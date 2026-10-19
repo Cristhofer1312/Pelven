@@ -522,6 +522,14 @@ export default function App() {
               )}
             </button>
 
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setActiveTab('maestro')}
+            >
+              🏛️ Maestro CNAC
+            </button>
+
             {result && (
               <button
                 type="button"
@@ -619,25 +627,29 @@ export default function App() {
       )}
 
       {/* Results Workspace with Tabs */}
-      {result && (
+      {(result || activeTab === 'maestro') && (
         <section className="glass-panel" style={{ padding: '24px 0 0 0' }}>
           {/* Navigation Tabs */}
           <div style={{ padding: '0 24px' }}>
             <div className="tabs-header">
-              <button
-                className={`tab-btn ${activeTab === 'oficial' ? 'active' : ''}`}
-                onClick={() => setActiveTab('oficial')}
-              >
-                <span>📑 Formato Oficial Excel</span>
-                <span className="tab-badge">{filasFiltradas.length}</span>
-              </button>
+              {result && (
+                <>
+                  <button
+                    className={`tab-btn ${activeTab === 'oficial' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('oficial')}
+                  >
+                    <span>📑 Formato Oficial Excel</span>
+                    <span className="tab-badge">{filasFiltradas.length}</span>
+                  </button>
 
-              <button
-                className={`tab-btn ${activeTab === 'analitico' ? 'active' : ''}`}
-                onClick={() => setActiveTab('analitico')}
-              >
-                <span>🔍 Desglose de Asistencia</span>
-              </button>
+                  <button
+                    className={`tab-btn ${activeTab === 'analitico' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('analitico')}
+                  >
+                    <span>🔍 Desglose de Asistencia</span>
+                  </button>
+                </>
+              )}
 
               <button
                 className={`tab-btn ${activeTab === 'maestro' ? 'active' : ''}`}
@@ -647,17 +659,19 @@ export default function App() {
                 <span className="tab-badge">{maestro.length}</span>
               </button>
 
-              <button
-                className={`tab-btn ${activeTab === 'auditoria' ? 'active' : ''}`}
-                onClick={() => setActiveTab('auditoria')}
-              >
-                <span>🛡️ Auditoría ({result.totalErrores})</span>
-              </button>
+              {result && (
+                <button
+                  className={`tab-btn ${activeTab === 'auditoria' ? 'active' : ''}`}
+                  onClick={() => setActiveTab('auditoria')}
+                >
+                  <span>🛡️ Auditoría ({result.totalErrores})</span>
+                </button>
+              )}
             </div>
           </div>
 
           {/* Table Search & Filter Toolbar */}
-          {(activeTab === 'oficial' || activeTab === 'analitico') && (
+          {result && (activeTab === 'oficial' || activeTab === 'analitico') && (
             <div className="table-toolbar">
               <div className="search-box">
                 <span className="search-icon">🔍</span>
@@ -724,7 +738,7 @@ export default function App() {
           )}
 
           {/* Tab 1: Official Excel View */}
-          {activeTab === 'oficial' && (
+          {result && activeTab === 'oficial' && (
             <div className="table-scroll-wrapper">
               <table className="pelven-table">
                 <thead>
@@ -781,7 +795,7 @@ export default function App() {
           )}
 
           {/* Tab 2: Detailed Analytics Breakdown */}
-          {activeTab === 'analitico' && (
+          {result && activeTab === 'analitico' && (
             <div className="table-scroll-wrapper">
               <table className="pelven-table">
                 <thead>
@@ -845,6 +859,11 @@ export default function App() {
                   </p>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  {!result && (
+                    <button type="button" className="btn-secondary" style={{ padding: '9px 14px' }} onClick={() => setActiveTab('oficial')}>
+                      Volver al inicio
+                    </button>
+                  )}
                   <input
                     type="text"
                     className="custom-input"
@@ -943,7 +962,7 @@ export default function App() {
           )}
 
           {/* Tab 4: Integrity & Validation Audit */}
-          {activeTab === 'auditoria' && (
+          {result && activeTab === 'auditoria' && (
             <div style={{ padding: 24 }}>
               <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
                 Auditoría de Integridad y Validación
