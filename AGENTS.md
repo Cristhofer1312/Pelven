@@ -31,6 +31,13 @@ Full derivation is in `pelven-web/README.md`; the high-signal constraints:
 - Validation rule: `Total Recaudación = Total Precio × Cantidad`, where `Total Precio = Boleto + Servicio + Otros×(1+IVA_otros)` (Boleto/Servicio already include IVA).
 - Text matching across files is accent- and case-insensitive (`norm()` helper, used in both engine and server for maestro keys `complejo|sala`).
 
+## Version control
+
+- Remote: `https://github.com/Cristhofer1312/Pelven.git`, branch `main`. Baseline tag: `baseline-2026`.
+- The 78 MB `COMPAÑIA ANONIMA EMPRESA CINES UNIDOS 20250102-20251231.xls` is intentionally **not tracked**. Keep it external (or as a release asset); never commit it.
+- Ignored: `node_modules/`, `dist/`, `uploads/`, `scratch/`, `*.pkl`, root `*.xls`/`*.xlsx` except the two small reference files.
+- Commit prefixes: `fix:`, `feat:`, `chore:`, `docs:`. Work on `fix/...` or `feat/...` branches; tag releases as `vX.Y.Z`.
+
 ## Operational gotchas
 
 - `maestro-seed.json` is loaded **once at server startup into memory**; UI edits via `/api/maestro` are not persisted back to disk. To make a maestro change permanent, edit the JSON file and restart the server.
