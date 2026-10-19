@@ -19,7 +19,7 @@ npm.cmd test            :: regresiones del motor (node --test)
 npm.cmd run verify:real :: verifica el .xls real de 78 MB en la raíz (0 errores, 551.094 filas)
 ```
 
-- There is **no lint or typecheck script**. `npm test` covers parser, números, validación, cálculo y export; verifica el flujo completo levantando el servidor y subiendo un archivo.
+- There is **no lint or typecheck script**. `npm test` cubre parser, números, validación, cálculo, duplicados y export (15 pruebas). `verify:real` valida el flujo completo con el archivo real.
 - `server.js` serves `dist/` if it exists (stale builds shadow the source). After UI changes, either use `npm.cmd run dev` or rebuild with `npm.cmd run build`.
 - `EADDRINUSE :::3001` means a server is already running. Find the PID (`netstat -ano | findstr :3001`) and stop only that process; do not kill every `node` process.
 
@@ -38,12 +38,15 @@ Full derivation is in `pelven-web/README.md`; the high-signal constraints:
 
 - Remote: `https://github.com/Cristhofer1312/Pelven.git`, branch `main`. Baseline tag: `baseline-2026`.
 - The 78 MB `COMPAÑIA ANONIMA EMPRESA CINES UNIDOS 20250102-20251231.xls` is intentionally **not tracked**. Keep it external (or as a release asset); never commit it.
-- Ignored: `node_modules/`, `dist/`, `uploads/`, `scratch/`, `*.pkl`, root `*.xls`/`*.xlsx` except the two small reference files.
+- Ignored: `node_modules/`, `dist/`, `uploads/`, `scratch/`, `*.pkl`, `pelven-web/maestro.json`, `pelven-web/runs/`, root `*.xls`/`*.xlsx` except the two small reference files.
 - Commit prefixes: `fix:`, `feat:`, `chore:`, `docs:`. Work on `fix/...` or `feat/...` branches; tag releases as `vX.Y.Z`.
 
 ## Operational gotchas
 
-- `maestro-seed.json` is loaded **once at server startup into memory**; UI edits via `/api/maestro` are not persisted back to disk. To make a maestro change permanent, edit the JSON file and restart the server. The Maestro tab is currently read-only.
+- `maestro-seed.json` es solo la semilla. En el primer arranque se copia a `maestro.json` (ignorado por Git), que es la fuente de verdad y se edita desde la pestaña **Maestro CNAC** (POST/PUT/DELETE). Los cambios persisten sin reiniciar y aplican a la próxima corrida.
+- Cada `/api/upload` escribe un manifiesto en `pelven-web/runs/` con SHA-256 de los archivos y los totales/errores/avisos. `GET /api/runs` y `/api/runs/:id` los exponen; la pestaña Auditoría los descarga.
+- La cobertura compara el rango declarado en el nombre (`...AAAAMMDD-AAAAMMDD...`) contra las fechas detectadas. Un hueco genera un aviso **no bloqueante** (ej. el reporte real termina el 30/12/2025 y el nombre declara hasta el 31/12/2025).
+- Los "posibles duplicados exactos" son informativos: en los reportes CNAC una misma combinación puede repetirse por lotes de venta. No se excluyen ni bloquean la exportación; el resumen queda en el manifiesto y en la pestaña Auditoría.
 - Uploads go to `pelven-web/uploads/` via multer but are deleted immediately after parsing (in a `finally`, so parse failures are cleaned too). The folder itself is recreated on boot.
 - Validation is blocking: rows with errors are excluded from `aggregateBySala`, the response sets `bloqueado: true`, and the UI/export endpoint refuse to generate the xlsx (`409`). Do not re-enable export with errors without an explicit override decision.
 - API responses embed the full result set as `_full` (the UI re-sends it to `/api/export`); don't "optimize" it away or the export breaks. `_full` contains only valid rows.

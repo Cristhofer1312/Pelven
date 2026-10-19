@@ -5,6 +5,17 @@ const PELVEN_FACTORES = [
   0.4762, 0.4286, 0.3810, 0.3333, 0.2857, 0.2381, 0.1905, 0.1429, 0.0952, 0.0476
 ];
 
+const emptyMaestroForm = () => ({
+  nro: '',
+  circuito: '',
+  administradora: '',
+  complejo: '',
+  estado: '',
+  ciudad: '',
+  sala: '',
+  aforo: '',
+});
+
 export default function App() {
   const [maestro, setMaestro] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
@@ -13,6 +24,15 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [result, setResult] = useState(null);
   const [toast, setToast] = useState(null);
+  const [exportarFiltrado, setExportarFiltrado] = useState(false);
+
+  // Maestro CNAC (CRUD persistente)
+  const [maestroQuery, setMaestroQuery] = useState('');
+  const [maestroForm, setMaestroForm] = useState(emptyMaestroForm);
+  const [maestroEditIdx, setMaestroEditIdx] = useState(null);
+  const [savingMaestro, setSavingMaestro] = useState(false);
+  const [runs, setRuns] = useState([]);
+  const [loadingRuns, setLoadingRuns] = useState(false);
   
   // Parámetros de cálculo
   const [anio, setAnio] = useState(2026);
@@ -27,12 +47,36 @@ export default function App() {
   
   const fileInputRef = useRef(null);
 
+  const cargarMaestro = async () => {
+    try {
+      const res = await fetch('/api/maestro');
+      const data = await res.json();
+      setMaestro(Array.isArray(data) ? data : []);
+    } catch {
+      setMaestro([]);
+    }
+  };
+
+  const cargarRuns = async () => {
+    setLoadingRuns(true);
+    try {
+      const res = await fetch('/api/runs');
+      const data = await res.json();
+      setRuns(Array.isArray(data) ? data : []);
+    } catch {
+      setRuns([]);
+    } finally {
+      setLoadingRuns(false);
+    }
+  };
+
   useEffect(() => {
-    fetch('/api/maestro')
-      .then((r) => r.json())
-      .then((data) => setMaestro(Array.isArray(data) ? data : []))
-      .catch(() => setMaestro([]));
+    cargarMaestro();
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'auditoria') cargarRuns();
+  }, [activeTab, result?.manifiesto?.id]);
 
   const showToast = (text, type = 'info') => {
     setToast({ text, type });
@@ -77,8 +121,8 @@ export default function App() {
     try {
       const fd = new FormData();
       selectedFiles.forEach((f) => fd.append('files', f));
+      fd.append('anio', String(anio));
       fd.append('factorDiario', String(factorDiario));
-      fd.append('semanasPorAnio', '52');
       fd.append('incluirTodosCircuitos', String(incluirTodosCircuitos));
 
       const res = await fetch('/api/upload', {
@@ -92,6 +136,7 @@ export default function App() {
       }
 
       setResult(data);
+      setExportarFiltrado(false);
       showToast(`¡Procesado exitoso! ${data.totalFilas.toLocaleString()} filas y ${data.salasDetectadas} salas`, 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -100,19 +145,25 @@ export default function App() {
     }
   };
 
-  // Descargar consolidado en Excel oficial
+  // Descargar consolidado en Excel oficial. Si "exportarFiltrado" está activo,
+  // se exportan solo las filas visibles con el filtro/búsqueda actual.
   const descargarExcel = async () => {
-    if (!result?._full?.length) return;
+    const filas = exportarFiltrado ? filasFiltradas : result?._full;
+    if (!filas?.length) {
+      showToast('No hay filas para exportar con el filtro actual', 'error');
+      return;
+    }
     if (result.bloqueado) {
       showToast('Exportación bloqueada: corrige los errores de validación antes de descargar', 'error');
       return;
     }
     setExporting(true);
     try {
+      const sufijo = exportarFiltrado ? 'filtrado' : '';
       const res = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filas: result._full, anio, bloqueado: result.bloqueado })
+        body: JSON.stringify({ filas, anio, bloqueado: result.bloqueado, sufijo })
       });
       if (res.status === 409) {
         const data = await res.json().catch(() => ({}));
@@ -121,18 +172,100 @@ export default function App() {
       if (!res.ok) throw new Error('Error al exportar archivo');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
+      const nombre = `Pelven_aplica_${anio}${sufijo ? '_' + sufijo : ''}.xlsx`;
       const a = document.createElement('a');
       a.href = url;
-      a.download = `Pelven_aplica_${anio}.xlsx`;
+      a.download = nombre;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      showToast(`Descarga iniciada: Pelven_aplica_${anio}.xlsx`, 'success');
+      showToast(`Descarga iniciada: ${nombre}${exportarFiltrado ? ' (solo filas filtradas)' : ''}`, 'success');
     } catch (err) {
       showToast('Error al descargar el archivo: ' + err.message, 'error');
     } finally {
       setExporting(false);
+    }
+  };
+
+  // Descarga el manifiesto completo de una corrida (trazabilidad).
+  const descargarManifiesto = async (id = result?.manifiesto?.id) => {
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(id)}`);
+      if (!res.ok) throw new Error('No se encontró el manifiesto');
+      const data = await res.json();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `manifiesto_${id}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast('Manifiesto descargado', 'success');
+    } catch (err) {
+      showToast('Error al descargar el manifiesto: ' + err.message, 'error');
+    }
+  };
+
+  const resetMaestroForm = () => {
+    setMaestroForm(emptyMaestroForm());
+    setMaestroEditIdx(null);
+  };
+
+  const editarMaestro = (item, idx) => {
+    setMaestroForm({
+      nro: item.nro ?? '',
+      circuito: item.circuito ?? '',
+      administradora: item.administradora ?? '',
+      complejo: item.complejo ?? '',
+      estado: item.estado ?? '',
+      ciudad: item.ciudad ?? '',
+      sala: item.sala ?? '',
+      aforo: item.aforo ?? '',
+    });
+    setMaestroEditIdx(idx);
+  };
+
+  const guardarMaestro = async (e) => {
+    e?.preventDefault();
+    if (!String(maestroForm.complejo || '').trim() || !String(maestroForm.sala || '').trim()) {
+      showToast('Complejo y sala son obligatorios', 'error');
+      return;
+    }
+    setSavingMaestro(true);
+    try {
+      const esEdicion = maestroEditIdx != null;
+      const res = await fetch(esEdicion ? `/api/maestro/${maestroEditIdx}` : '/api/maestro', {
+        method: esEdicion ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(maestroForm),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'No se pudo guardar la sala');
+      await cargarMaestro();
+      resetMaestroForm();
+      showToast(esEdicion ? 'Sala actualizada en el maestro' : 'Sala agregada al maestro', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setSavingMaestro(false);
+    }
+  };
+
+  const eliminarMaestro = async (item, idx) => {
+    if (!window.confirm(`¿Eliminar "${item.complejo}" sala ${item.sala} del maestro?`)) return;
+    try {
+      const res = await fetch(`/api/maestro/${idx}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'No se pudo eliminar la sala');
+      await cargarMaestro();
+      resetMaestroForm();
+      showToast('Sala eliminada del maestro', 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
     }
   };
 
@@ -174,6 +307,32 @@ export default function App() {
       return matchesSearch && matchesCircuito && matchesComplejo;
     });
   }, [result, searchTerm, filterCircuito, filterComplejo]);
+
+  const maestroFiltrado = useMemo(() => {
+    const q = maestroQuery.trim().toLowerCase();
+    if (!q) return maestro;
+    return maestro.filter((m) =>
+      [m.nro, m.circuito, m.administradora, m.complejo, m.estado, m.ciudad, m.sala].some((v) =>
+        String(v ?? '').toLowerCase().includes(q)
+      )
+    );
+  }, [maestro, maestroQuery]);
+
+  const duplicados = result?.duplicados || { grupos: 0, filasExtra: 0, detalle: [] };
+  const cobertura = result?.cobertura || null;
+  const coberturaOk = cobertura ? cobertura.completa !== false : true;
+  const manifiesto = result?.manifiesto || null;
+
+  const maestroCampos = [
+    { key: 'nro', label: 'Nro', type: 'number' },
+    { key: 'circuito', label: 'Circuito' },
+    { key: 'administradora', label: 'Administradora' },
+    { key: 'complejo', label: 'Complejo' },
+    { key: 'estado', label: 'Estado' },
+    { key: 'ciudad', label: 'Ciudad' },
+    { key: 'sala', label: 'Sala' },
+    { key: 'aforo', label: 'Aforo', type: 'number' },
+  ];
 
   // Cálculos de KPI ejecutivos
   const kpis = useMemo(() => {
@@ -541,6 +700,16 @@ export default function App() {
                   ))}
                 </select>
 
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={exportarFiltrado}
+                    onChange={(e) => setExportarFiltrado(e.target.checked)}
+                    style={{ width: 15, height: 15, accentColor: 'var(--wine-primary)' }}
+                  />
+                  Solo filas filtradas ({filasFiltradas.length})
+                </label>
+
                 <button
                   type="button"
                   className="btn-download"
@@ -665,17 +834,62 @@ export default function App() {
             </div>
           )}
 
-          {/* Tab 3: Maestro CNAC Directory */}
+          {/* Tab 3: Maestro CNAC Directory (CRUD persistente) */}
           {activeTab === 'maestro' && (
             <div style={{ padding: 24 }}>
-              <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
                 <div>
                   <h3 style={{ fontSize: 16, fontWeight: 700 }}>Directorio Nacional de Salas CNAC</h3>
                   <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
-                    Total de {maestro.length} salas registradas en todos los circuitos nacionales.
+                    {maestro.length} salas registradas. Los cambios se guardan en <code>maestro.json</code> y aplican a la próxima corrida.
                   </p>
                 </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <input
+                    type="text"
+                    className="custom-input"
+                    placeholder="Buscar sala, complejo, circuito..."
+                    value={maestroQuery}
+                    onChange={(e) => setMaestroQuery(e.target.value)}
+                    style={{ minWidth: 240 }}
+                  />
+                  <button type="button" className="btn-secondary" onClick={resetMaestroForm} style={{ padding: '9px 14px' }}>
+                    + Nueva sala
+                  </button>
+                </div>
               </div>
+
+              <form onSubmit={guardarMaestro} style={{ marginBottom: 18, padding: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 12, border: '1px solid var(--border-subtle)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <strong style={{ fontSize: 13 }}>
+                    {maestroEditIdx != null ? `Editando sala #${maestroEditIdx}` : 'Agregar sala al maestro'}
+                  </strong>
+                  {maestroEditIdx != null && (
+                    <button type="button" className="btn-secondary" style={{ padding: '5px 10px', fontSize: 12 }} onClick={resetMaestroForm}>
+                      Cancelar edición
+                    </button>
+                  )}
+                </div>
+                <div className="maestro-form-grid">
+                  {maestroCampos.map((campo) => (
+                    <div key={campo.key} className="input-field-wrapper">
+                      <span className="input-label">{campo.label}</span>
+                      <input
+                        type={campo.type || 'text'}
+                        className="custom-input"
+                        value={maestroForm[campo.key] ?? ''}
+                        onChange={(e) => setMaestroForm((prev) => ({ ...prev, [campo.key]: e.target.value }))}
+                      />
+                    </div>
+                  ))}
+                  <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+                    <button type="submit" className="btn-primary" style={{ padding: '10px 18px' }} disabled={savingMaestro}>
+                      {savingMaestro ? 'Guardando…' : maestroEditIdx != null ? 'Guardar cambios' : 'Agregar sala'}
+                    </button>
+                  </div>
+                </div>
+              </form>
+
               <div className="table-scroll-wrapper" style={{ maxHeight: 480 }}>
                 <table className="pelven-table">
                   <thead>
@@ -688,27 +902,41 @@ export default function App() {
                       <th>Ciudad</th>
                       <th>Sala</th>
                       <th>Aforo</th>
+                      <th>Acciones</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {maestro.slice(0, 100).map((m, i) => (
-                      <tr key={i}>
-                        <td className="col-center">{m.nro || i + 1}</td>
-                        <td style={{ fontWeight: 600 }}>{m.circuito}</td>
-                        <td>{m.administradora}</td>
-                        <td style={{ color: '#fff' }}>{m.complejo}</td>
-                        <td className="col-center">{m.estado}</td>
-                        <td className="col-center">{m.ciudad}</td>
-                        <td className="col-center">{m.sala}</td>
-                        <td className="col-num">{m.aforo}</td>
-                      </tr>
-                    ))}
+                    {maestroFiltrado.map((m) => {
+                      const idx = maestro.indexOf(m);
+                      return (
+                        <tr key={`${m.nro}-${idx}`}>
+                          <td className="col-center">{m.nro || idx + 1}</td>
+                          <td style={{ fontWeight: 600 }}>{m.circuito}</td>
+                          <td>{m.administradora}</td>
+                          <td style={{ color: '#fff' }}>{m.complejo}</td>
+                          <td className="col-center">{m.estado}</td>
+                          <td className="col-center">{m.ciudad}</td>
+                          <td className="col-center">{m.sala}</td>
+                          <td className="col-num">{m.aforo}</td>
+                          <td className="col-center">
+                            <div className="row-actions">
+                              <button type="button" className="mini-btn" onClick={() => editarMaestro(m, idx)}>
+                                Editar
+                              </button>
+                              <button type="button" className="mini-btn danger" onClick={() => eliminarMaestro(m, idx)}>
+                                Eliminar
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
-              {maestro.length > 100 && (
+              {maestroFiltrado.length === 0 && (
                 <p style={{ marginTop: 12, fontSize: 12, color: 'var(--text-dim)', textAlign: 'center' }}>
-                  Mostrando las primeras 100 salas de {maestro.length} registradas en el maestro.
+                  No hay salas que coincidan con la búsqueda.
                 </p>
               )}
             </div>
@@ -736,10 +964,14 @@ export default function App() {
                   </div>
                 </div>
 
-                <div style={{ padding: 16, background: 'rgba(56, 189, 248, 0.08)', borderRadius: 12, border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-                  <div style={{ color: '#38bdf8', fontWeight: 700, marginBottom: 4 }}>✓ Rango de Fechas</div>
+                <div style={{ padding: 16, background: coberturaOk ? 'rgba(56, 189, 248, 0.08)' : 'rgba(251, 191, 36, 0.08)', borderRadius: 12, border: `1px solid ${coberturaOk ? 'rgba(56, 189, 248, 0.2)' : 'rgba(251, 191, 36, 0.35)'}` }}>
+                  <div style={{ color: coberturaOk ? '#38bdf8' : '#fbbf24', fontWeight: 700, marginBottom: 4 }}>
+                    {coberturaOk ? '✓' : '⚠'} Cobertura / Rango de fechas
+                  </div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {rangoGlobal ? `${rangoGlobal} · ${result.archivos.length} archivo(s)` : 'Sin rango disponible'}
+                    {cobertura
+                      ? `${cobertura.detectado?.desde || '?'} al ${cobertura.detectado?.hasta || '?'}${cobertura.esperado ? ` · declarado: ${cobertura.esperado.desde} al ${cobertura.esperado.hasta}` : ''}${cobertura.totalFaltantes > 0 ? ` · faltan ${cobertura.totalFaltantes} día(s)` : ''}`
+                      : rangoGlobal || 'Sin rango disponible'}
                   </div>
                 </div>
 
@@ -751,6 +983,31 @@ export default function App() {
                     {result.salasDetectadas} salas procesadas; {sinMaestro} sin maestro; {salasSinData} sin datos.
                   </div>
                 </div>
+
+                <div style={{ padding: 16, background: duplicados.grupos ? 'rgba(251, 191, 36, 0.08)' : 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: `1px solid ${duplicados.grupos ? 'rgba(251, 191, 36, 0.35)' : 'rgba(16, 185, 129, 0.2)'}` }}>
+                  <div style={{ color: duplicados.grupos ? '#fbbf24' : '#34d399', fontWeight: 700, marginBottom: 4 }}>
+                    {duplicados.grupos ? '⚠' : '✓'} Posibles duplicados exactos
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {duplicados.grupos
+                      ? `${duplicados.grupos.toLocaleString()} grupo(s) · ${duplicados.filasExtra.toLocaleString()} fila(s) repetidas. Informativo; no se excluyen automáticamente.`
+                      : 'No se detectaron filas idénticas.'}
+                  </div>
+                </div>
+
+                <div style={{ padding: 16, background: 'rgba(56, 189, 248, 0.08)', borderRadius: 12, border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                  <div style={{ color: '#38bdf8', fontWeight: 700, marginBottom: 4 }}>🧾 Manifiesto de la corrida</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    {manifiesto
+                      ? `${manifiesto.id} · ${manifiesto.fecha ? new Date(manifiesto.fecha).toLocaleString() : ''}${manifiesto.guardado === false ? ' · no persistido' : ''}`
+                      : 'Sin manifiesto disponible'}
+                  </div>
+                  {manifiesto?.id && (
+                    <button type="button" className="btn-secondary" style={{ padding: '5px 10px', fontSize: 12 }} disabled={manifiesto.guardado === false} onClick={() => descargarManifiesto()}>
+                      Descargar JSON
+                    </button>
+                  )}
+                </div>
               </div>
 
               {result.archivos?.length > 0 && (
@@ -761,6 +1018,7 @@ export default function App() {
                       <thead>
                         <tr>
                           <th>Archivo</th>
+                          <th>SHA-256</th>
                           <th>Filas</th>
                           <th>Válidas</th>
                           <th>Inválidas</th>
@@ -774,6 +1032,9 @@ export default function App() {
                         {result.archivos.map((a, i) => (
                           <tr key={i}>
                             <td style={{ fontWeight: 600 }}>{a.file}</td>
+                            <td className="col-center" style={{ fontFamily: 'monospace', fontSize: 11 }} title={a.sha256 || ''}>
+                              {a.sha256 ? `${a.sha256.slice(0, 12)}…` : '—'}
+                            </td>
                             <td className="col-num">{a.filas?.toLocaleString()}</td>
                             <td className="col-num">{a.filasValidas?.toLocaleString()}</td>
                             <td className="col-num" style={{ color: a.filasInvalidas ? '#f87171' : undefined }}>{a.filasInvalidas}</td>
@@ -788,6 +1049,139 @@ export default function App() {
                   </div>
                 </div>
               )}
+
+              {cobertura && (cobertura.totalFaltantes > 0 || cobertura.esperado) && (
+                <div style={{ marginBottom: 24 }}>
+                  <h4 style={{ color: cobertura.totalFaltantes ? '#fbbf24' : '#38bdf8', marginBottom: 8 }}>
+                    Cobertura declarada vs detectada
+                  </h4>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    Detectado: {cobertura.detectado?.desde || '—'} al {cobertura.detectado?.hasta || '—'}
+                    {cobertura.esperado ? ` · Declarado en el nombre: ${cobertura.esperado.desde} al ${cobertura.esperado.hasta}` : ''}
+                  </p>
+                  {cobertura.totalFaltantes > 0 && (
+                    <div style={{ padding: 12, borderRadius: 8, background: 'rgba(251, 191, 36, 0.08)', border: '1px solid rgba(251, 191, 36, 0.3)', fontSize: 12, color: '#fbbf24' }}>
+                      Faltan {cobertura.totalFaltantes} día(s): {cobertura.faltantes.join(', ')}
+                      {cobertura.totalFaltantes > cobertura.faltantes.length ? ' …' : ''}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {duplicados.detalle?.length > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <h4 style={{ color: '#fbbf24', marginBottom: 8 }}>
+                    Posibles duplicados exactos ({duplicados.grupos.toLocaleString()} grupos · {duplicados.filasExtra.toLocaleString()} filas extra)
+                  </h4>
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    Informativo: una misma combinación puede provenir de lotes de venta distintos. No se excluye del cálculo ni bloquea la exportación.
+                  </p>
+                  <div className="table-scroll-wrapper" style={{ maxHeight: 320 }}>
+                    <table className="pelven-table">
+                      <thead>
+                        <tr>
+                          <th>Fecha</th>
+                          <th>Complejo</th>
+                          <th>Sala</th>
+                          <th>Hora</th>
+                          <th>Función</th>
+                          <th>Tipo</th>
+                          <th>Cantidad</th>
+                          <th>Veces</th>
+                          <th>Origen</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {duplicados.detalle.map((d, i) => (
+                          <tr key={i}>
+                            <td className="col-center">{d.fecha}</td>
+                            <td>{d.complejo}</td>
+                            <td className="col-center">{d.sala}</td>
+                            <td className="col-center">{d.hora}</td>
+                            <td className="col-center">{d.funcion}</td>
+                            <td className="col-center">{d.tipoBoleto}</td>
+                            <td className="col-num">{d.cantidad}</td>
+                            <td className="col-center" style={{ fontWeight: 700, color: '#fbbf24' }}>{d.ocurrencias}</td>
+                            <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                              {d.filas.map((f, j) => `${f.archivo || '—'}:${f.linea}`).join(' · ')}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {duplicados.detalleTruncado && (
+                    <p style={{ marginTop: 8, fontSize: 12, color: 'var(--text-dim)' }}>
+                      Mostrando los primeros {duplicados.detalle.length} grupos. El manifiesto conserva el resumen completo.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {manifiesto && (
+                <div style={{ marginBottom: 24 }}>
+                  <h4 style={{ marginBottom: 8 }}>Manifiesto de la corrida</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, fontSize: 12, color: 'var(--text-muted)' }}>
+                    <div><strong>ID:</strong> {manifiesto.id}</div>
+                    <div><strong>Versión:</strong> {manifiesto.version}</div>
+                    <div><strong>Fecha:</strong> {manifiesto.fecha ? new Date(manifiesto.fecha).toLocaleString() : '—'}</div>
+                    <div><strong>Bloqueado:</strong> {manifiesto.salidas?.bloqueado ? 'Sí' : 'No'}</div>
+                    <div><strong>Filas:</strong> {manifiesto.totales?.filas?.toLocaleString()}</div>
+                    <div><strong>Errores:</strong> {manifiesto.totales?.errores}</div>
+                    <div><strong>Avisos:</strong> {manifiesto.totales?.avisos}</div>
+                    <div><strong>Salas:</strong> {manifiesto.salidas?.salas}</div>
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    <button type="button" className="btn-secondary" style={{ padding: '6px 12px', fontSize: 12 }} disabled={manifiesto.guardado === false} onClick={() => descargarManifiesto()}>
+                      Descargar manifiesto JSON
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ marginBottom: 24 }}>
+                <h4 style={{ marginBottom: 8 }}>Corridas recientes</h4>
+                {loadingRuns ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Cargando historial…</p>
+                ) : runs.length === 0 ? (
+                  <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>Sin corridas persistidas todavía.</p>
+                ) : (
+                  <div className="table-scroll-wrapper" style={{ maxHeight: 260 }}>
+                    <table className="pelven-table">
+                      <thead>
+                        <tr>
+                          <th>Fecha</th>
+                          <th>ID</th>
+                          <th>Archivos</th>
+                          <th>Filas</th>
+                          <th>Errores</th>
+                          <th>Salas</th>
+                          <th>Estado</th>
+                          <th>Manifiesto</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {runs.map((r) => (
+                          <tr key={r.id}>
+                            <td className="col-center">{r.fecha ? new Date(r.fecha).toLocaleString() : '—'}</td>
+                            <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{r.id}</td>
+                            <td className="col-center">{r.archivos?.length || 0}</td>
+                            <td className="col-num">{r.totales?.filas?.toLocaleString?.() ?? r.totales?.filas}</td>
+                            <td className="col-num" style={{ color: r.totales?.errores ? '#f87171' : undefined }}>{r.totales?.errores}</td>
+                            <td className="col-num">{r.salidas?.salas}</td>
+                            <td className="col-center">{r.bloqueado ? 'Bloqueada' : 'OK'}</td>
+                            <td className="col-center">
+                              <button type="button" className="mini-btn" onClick={() => descargarManifiesto(r.id)}>
+                                JSON
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
 
               {result.totalAvisos > 0 && (
                 <div style={{ marginBottom: 24 }}>
