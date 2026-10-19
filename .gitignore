@@ -1,0 +1,31 @@
+# Dependencias
+node_modules/
+pelven-web/node_modules/
+
+# Builds y temporales de ejecución
+dist/
+pelven-web/dist/
+uploads/
+pelven-web/uploads/
+
+# Análisis exploratorio local
+scratch/
+*.pkl
+
+# Datos grandes: el reporte de entrada de Cines Unidos pesa ~78 MB.
+# Se conservan las referencias pequeñas del proceso.
+/*.xls
+!/Pelven aplica 2026.xls
+/*.xlsx
+!/Pelven_generado_2026.xlsx
+
+# Entorno, logs y archivos de sistema/editor
+.env
+.env.*
+!.env.example
+*.log
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vscode/
+.idea/

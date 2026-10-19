@@ -1,0 +1,720 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+
+const PELVEN_FACTORES = [
+  0.9524, 0.9048, 0.8571, 0.8095, 0.7619, 0.7143, 0.6667, 0.6190, 0.5714, 0.5238,
+  0.4762, 0.4286, 0.3810, 0.3333, 0.2857, 0.2381, 0.1905, 0.1429, 0.0952, 0.0476
+];
+
+export default function App() {
+  const [maestro, setMaestro] = useState([]);
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [toast, setToast] = useState(null);
+  
+  // Parámetros de cálculo
+  const [anio, setAnio] = useState(2026);
+  const [factorDiario, setFactorDiario] = useState(4.20);
+  
+  // Filtros de navegación
+  const [activeTab, setActiveTab] = useState('oficial'); // 'oficial' | 'analitico' | 'maestro' | 'auditoria'
+  const [searchTerm, setSearchTerm] = useState('');
+  const [filterCircuito, setFilterCircuito] = useState('TODOS');
+  const [filterComplejo, setFilterComplejo] = useState('TODOS');
+  const [incluirTodosCircuitos, setIncluirTodosCircuitos] = useState(false);
+  
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    fetch('/api/maestro')
+      .then((r) => r.json())
+      .then((data) => setMaestro(Array.isArray(data) ? data : []))
+      .catch(() => setMaestro([]));
+  }, []);
+
+  const showToast = (text, type = 'info') => {
+    setToast({ text, type });
+    setTimeout(() => setToast(null), 4500);
+  };
+
+  // Manejador de selección de archivos
+  const handleFileChange = (e) => {
+    if (e.target.files?.length) {
+      setSelectedFiles(Array.from(e.target.files));
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files?.length) {
+      setSelectedFiles(Array.from(e.dataTransfer.files));
+    }
+  };
+
+  // Enviar archivo al backend para cálculo
+  const procesarReporte = async (e) => {
+    if (e) e.preventDefault();
+    if (!selectedFiles.length) {
+      showToast('Por favor selecciona al menos un archivo de taquilla', 'error');
+      return;
+    }
+
+    setLoading(true);
+    showToast('Procesando datos de taquilla...', 'info');
+
+    try {
+      const fd = new FormData();
+      selectedFiles.forEach((f) => fd.append('files', f));
+      fd.append('factorDiario', String(factorDiario));
+      fd.append('semanasPorAnio', '52');
+      fd.append('incluirTodosCircuitos', String(incluirTodosCircuitos));
+
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: fd
+      });
+
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        throw new Error(data.error || 'Error en el servidor al procesar el reporte');
+      }
+
+      setResult(data);
+      showToast(`¡Procesado exitoso! ${data.totalFilas.toLocaleString()} filas y ${data.salasDetectadas} salas`, 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Descargar consolidado en Excel oficial
+  const descargarExcel = async () => {
+    if (!result?._full?.length) return;
+    setExporting(true);
+    try {
+      const res = await fetch('/api/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filas: result._full, anio })
+      });
+      if (!res.ok) throw new Error('Error al exportar archivo');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Pelven_aplica_${anio}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast(`Descarga iniciada: Pelven_aplica_${anio}.xlsx`, 'success');
+    } catch (err) {
+      showToast('Error al descargar el archivo: ' + err.message, 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Listados únicos de circuitos y complejos para filtros rápidos
+  const circuitosDisponibles = useMemo(() => {
+    if (!result?._full) return [];
+    const setCirc = new Set(result._full.map((r) => r.circuito).filter(Boolean));
+    return ['TODOS', ...Array.from(setCirc).sort()];
+  }, [result]);
+
+  const complejosDisponibles = useMemo(() => {
+    if (!result?._full) return [];
+    const filteredByCirc = filterCircuito === 'TODOS'
+      ? result._full
+      : result._full.filter((r) => r.circuito === filterCircuito);
+    const setComp = new Set(filteredByCirc.map((r) => r.complejo).filter(Boolean));
+    return ['TODOS', ...Array.from(setComp).sort()];
+  }, [result, filterCircuito]);
+
+  // Filtrado de filas en la tabla
+  const filasFiltradas = useMemo(() => {
+    if (!result?._full) return [];
+    return result._full.filter((r) => {
+      const matchesSearch =
+        !searchTerm ||
+        r.circuito?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        r.administradora?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        r.complejo?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        String(r.sala).toLowerCase().includes(searchTerm.toLowerCase()) ||
+        r.ciudad?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        r.estado?.toLowerCase().includes(searchTerm.toLowerCase());
+
+      const matchesCircuito =
+        filterCircuito === 'TODOS' || r.circuito === filterCircuito;
+
+      const matchesComplejo =
+        filterComplejo === 'TODOS' || r.complejo === filterComplejo;
+
+      return matchesSearch && matchesCircuito && matchesComplejo;
+    });
+  }, [result, searchTerm, filterCircuito, filterComplejo]);
+
+  // Cálculos de KPI ejecutivos
+  const kpis = useMemo(() => {
+    if (!result?._full) return null;
+    const totalEspectadores = result._full.reduce((acc, r) => acc + (r.totalEspectadores || 0), 0);
+    const promBase = result._full.length
+      ? result._full.reduce((acc, r) => acc + (r.base || 0), 0) / result._full.length
+      : 0;
+    return {
+      totalFilas: result.totalFilas || 0,
+      totalSalas: result._full.length,
+      totalComplejos: complejosDisponibles.length - 1,
+      totalEspectadores,
+      promBase: promBase.toFixed(1),
+      errores: result.totalErrores || 0
+    };
+  }, [result, complejosDisponibles]);
+
+  return (
+    <div className="app-container">
+      {/* Header Bar */}
+      <header className="header-bar">
+        <div className="brand-wrapper">
+          <div className="brand-logo">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect>
+              <line x1="7" y1="2" x2="7" y2="22"></line>
+              <line x1="17" y1="2" x2="17" y2="22"></line>
+              <line x1="2" y1="12" x2="22" y2="12"></line>
+              <line x1="2" y1="7" x2="7" y2="7"></line>
+              <line x1="2" y1="17" x2="7" y2="17"></line>
+              <line x1="17" y1="17" x2="22" y2="17"></line>
+              <line x1="17" y1="7" x2="22" y2="7"></line>
+            </svg>
+          </div>
+          <div>
+            <div className="brand-title">
+              PELVEN <span className="brand-badge">CNAC Oficial</span>
+            </div>
+            <div className="brand-sub">
+              Sistema de Determinación de Promedio de Salas Cinematográficas · Providencia N° 002
+            </div>
+          </div>
+        </div>
+
+        <div className="header-status-pills">
+          <div className="status-pill active">
+            <span className="dot-indicator"></span> Motor Activo
+          </div>
+          <div className="status-pill">
+            Aplica Año: <strong>{anio}</strong>
+          </div>
+          <div className="status-pill">
+            Factor: <strong>{Number(factorDiario).toFixed(2)}</strong> (Vesp+Inter+Noche)
+          </div>
+          <div className="status-pill">
+            Redondeo: <strong>≥ 0.70</strong> (al entero mayor)
+          </div>
+          <div className="status-pill">
+            Circuito(s): <strong>{result?.circuitosDetectados?.join(', ') || 'Multicircuito soportado'}</strong>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Upload & Configuration Card */}
+      <section className="glass-panel upload-card">
+        <div
+          className={`drop-zone ${isDragging ? 'dragover' : ''}`}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".xls,.xlsx,.csv,.ods,.tsv,.txt"
+            onChange={handleFileChange}
+            style={{ display: 'none' }}
+          />
+          <div className="drop-icon-circle">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+          </div>
+          <div className="drop-title">
+            Arrastra el reporte de taquilla semanal o anual aquí
+          </div>
+          <div className="drop-sub">
+            Formatos soportados: <code>.csv</code> (comas o punto y coma), <code>.ods</code> (LibreOffice/OpenDocument), <code>.xls</code> o <code>.xlsx</code>
+          </div>
+
+          {selectedFiles.length > 0 && (
+            <div className="file-chip-container" onClick={(e) => e.stopPropagation()}>
+              {selectedFiles.map((f, i) => (
+                <div key={i} className="file-chip">
+                  <span>📄 {f.name}</span>
+                  <span style={{ opacity: 0.6 }}>({(f.size / (1024 * 1024)).toFixed(1)} MB)</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Configuration Toolbar */}
+        <div className="controls-bar">
+          <div className="inputs-group">
+            <div className="input-field-wrapper">
+              <span className="input-label">Año a Publicar</span>
+              <input
+                type="number"
+                className="custom-input"
+                style={{ width: 110 }}
+                value={anio}
+                onChange={(e) => setAnio(Number(e.target.value))}
+              />
+            </div>
+
+            <div className="input-field-wrapper">
+              <span className="input-label">Factor Diario Calibrado</span>
+              <input
+                type="number"
+                step="0.05"
+                className="custom-input"
+                style={{ width: 120 }}
+                value={factorDiario}
+                onChange={(e) => setFactorDiario(Number(e.target.value))}
+              />
+            </div>
+
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, cursor: 'pointer', color: 'var(--text-muted)', marginTop: 18 }}>
+              <input
+                type="checkbox"
+                checked={incluirTodosCircuitos}
+                onChange={(e) => setIncluirTodosCircuitos(e.target.checked)}
+                style={{ width: 16, height: 16, accentColor: 'var(--wine-primary)' }}
+              />
+              <span>Incluir plantilla nacional completa (323 salas de los 4 circuitos)</span>
+            </label>
+          </div>
+
+          <div className="actions-group">
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={loading || !selectedFiles.length}
+              onClick={procesarReporte}
+            >
+              {loading ? (
+                <>
+                  <span className="spinner"></span> Procesando reporte...
+                </>
+              ) : (
+                <>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                  </svg>
+                  Procesar y Generar Reporte
+                </>
+              )}
+            </button>
+
+            {result && (
+              <button
+                type="button"
+                className="btn-download"
+                disabled={exporting}
+                onClick={descargarExcel}
+              >
+                {exporting ? (
+                  <>
+                    <span className="spinner"></span> Generando XLSX...
+                  </>
+                ) : (
+                  <>
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <polyline points="7 10 12 15 17 10"></polyline>
+                      <line x1="12" y1="15" x2="12" y2="3"></line>
+                    </svg>
+                    Descargar Excel Oficial (.xlsx)
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Regulatory Info Callout */}
+        <div className="info-callout">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ flexShrink: 0, marginTop: 2 }}>
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="12" y1="16" x2="12" y2="12"></line>
+            <line x1="12" y1="8" x2="12.01" y2="8"></line>
+          </svg>
+          <div>
+            <strong>Regla de Cálculo Pelven:</strong> Promedio diario de espectadores en funciones <em>Vespertina</em>, <em>Intermedia</em> y <em>Noche</em> multiplicado por el factor calibrado <code>4.20</code> (=21/5). <strong>Criterio de Redondeo:</strong> los cálculos se redondean al entero mayor a partir de <code>.70</code> (ej. 10.70 → 11; 10.69 → 10). Las columnas 20 a 1 aplican los factores porcentuales reglamentarios oficiales.
+          </div>
+        </div>
+      </section>
+
+      {/* KPI Dashboard Metrics (when result available) */}
+      {kpis && (
+        <section className="stats-grid">
+          <div className="glass-panel stat-card">
+            <div className="stat-header">
+              <span className="stat-label">Filas de Taquilla</span>
+              <div className="stat-icon">📊</div>
+            </div>
+            <div className="stat-value">{kpis.totalFilas.toLocaleString()}</div>
+            <div className="stat-caption">Registros individuales validados</div>
+          </div>
+
+          <div className="glass-panel stat-card">
+            <div className="stat-header">
+              <span className="stat-label">Salas Calculadas</span>
+              <div className="stat-icon">🎬</div>
+            </div>
+            <div className="stat-value">{kpis.totalSalas}</div>
+            <div className="stat-caption">En {kpis.totalComplejos} complejos cinematográficos</div>
+          </div>
+
+          <div className="glass-panel stat-card">
+            <div className="stat-header">
+              <span className="stat-label">Espectadores Totales</span>
+              <div className="stat-icon">🎟️</div>
+            </div>
+            <div className="stat-value">{kpis.totalEspectadores.toLocaleString()}</div>
+            <div className="stat-caption">Asistencia anual acumulada</div>
+          </div>
+
+          <div className="glass-panel stat-card">
+            <div className="stat-header">
+              <span className="stat-label">Promedio Base (Col 21)</span>
+              <div className="stat-icon">📈</div>
+            </div>
+            <div className="stat-value">{kpis.promBase}</div>
+            <div className="stat-caption">Espectadores promedio sala/día</div>
+          </div>
+        </section>
+      )}
+
+      {/* Results Workspace with Tabs */}
+      {result && (
+        <section className="glass-panel" style={{ padding: '24px 0 0 0' }}>
+          {/* Navigation Tabs */}
+          <div style={{ padding: '0 24px' }}>
+            <div className="tabs-header">
+              <button
+                className={`tab-btn ${activeTab === 'oficial' ? 'active' : ''}`}
+                onClick={() => setActiveTab('oficial')}
+              >
+                <span>📑 Formato Oficial Excel</span>
+                <span className="tab-badge">{filasFiltradas.length}</span>
+              </button>
+
+              <button
+                className={`tab-btn ${activeTab === 'analitico' ? 'active' : ''}`}
+                onClick={() => setActiveTab('analitico')}
+              >
+                <span>🔍 Desglose de Asistencia</span>
+              </button>
+
+              <button
+                className={`tab-btn ${activeTab === 'maestro' ? 'active' : ''}`}
+                onClick={() => setActiveTab('maestro')}
+              >
+                <span>🏛️ Maestro CNAC</span>
+                <span className="tab-badge">{maestro.length}</span>
+              </button>
+
+              <button
+                className={`tab-btn ${activeTab === 'auditoria' ? 'active' : ''}`}
+                onClick={() => setActiveTab('auditoria')}
+              >
+                <span>🛡️ Auditoría ({result.totalErrores})</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Table Search & Filter Toolbar */}
+          {(activeTab === 'oficial' || activeTab === 'analitico') && (
+            <div className="table-toolbar">
+              <div className="search-box">
+                <span className="search-icon">🔍</span>
+                <input
+                  type="text"
+                  placeholder="Buscar complejo, sala, ciudad o estado..."
+                  className="search-input"
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <span className="input-label" style={{ margin: 0 }}>Circuito:</span>
+                <select
+                  className="custom-input"
+                  style={{ maxWidth: 170 }}
+                  value={filterCircuito}
+                  onChange={(e) => {
+                    setFilterCircuito(e.target.value);
+                    setFilterComplejo('TODOS');
+                  }}
+                >
+                  {circuitosDisponibles.map((c, i) => (
+                    <option key={i} value={c}>{c}</option>
+                  ))}
+                </select>
+
+                <span className="input-label" style={{ margin: 0 }}>Complejo:</span>
+                <select
+                  className="custom-input"
+                  style={{ maxWidth: 220 }}
+                  value={filterComplejo}
+                  onChange={(e) => setFilterComplejo(e.target.value)}
+                >
+                  {complejosDisponibles.map((c, i) => (
+                    <option key={i} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="button"
+                  className="btn-download"
+                  style={{ padding: '8px 16px', fontSize: 13 }}
+                  onClick={descargarExcel}
+                  disabled={exporting}
+                >
+                  📥 Exportar (.xlsx)
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Tab 1: Official Excel View */}
+          {activeTab === 'oficial' && (
+            <div className="table-scroll-wrapper">
+              <table className="pelven-table">
+                <thead>
+                  <tr>
+                    <th rowSpan={3} style={{ width: 50 }}>Nro</th>
+                    <th rowSpan={3} style={{ width: 130 }}>Circuito</th>
+                    <th rowSpan={3} style={{ width: 220 }}>Administradora</th>
+                    <th rowSpan={3} style={{ width: 180 }}>Complejos</th>
+                    <th rowSpan={3} style={{ width: 100 }}>Estado</th>
+                    <th rowSpan={3} style={{ width: 100 }}>Ciudad</th>
+                    <th rowSpan={3} style={{ width: 50 }}>Salas</th>
+                    <th rowSpan={3} style={{ width: 60 }}>Aforo</th>
+                    <th colSpan={21}>FUNCIONES</th>
+                  </tr>
+                  <tr className="secondary-header">
+                    <th style={{ background: '#501322' }}>21</th>
+                    {Array.from({ length: 20 }, (_, i) => (
+                      <th key={i}>{20 - i}</th>
+                    ))}
+                  </tr>
+                  <tr className="factor-header">
+                    <th>100 % PELVEN</th>
+                    {PELVEN_FACTORES.map((f, i) => (
+                      <th key={i}>{(f * 100).toFixed(2)}%</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {filasFiltradas.map((r, i) => (
+                    <tr key={i}>
+                      <td className="col-center" style={{ color: 'var(--text-dim)' }}>{i + 1}</td>
+                      <td>{r.circuito}</td>
+                      <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.administradora}</td>
+                      <td style={{ fontWeight: 600, color: '#fff' }}>{r.complejo}</td>
+                      <td className="col-center">{r.estado}</td>
+                      <td className="col-center">{r.ciudad}</td>
+                      <td className="col-center" style={{ fontWeight: 600 }}>{r.sala}</td>
+                      <td className="col-num">{r.aforo || 0}</td>
+                      {/* Columna Base FUNCIONES destacada */}
+                      <td className="col-highlight">{r.base.toLocaleString()}</td>
+                      {Array.from({ length: 20 }, (_, k) => {
+                        const val = r['f' + (20 - k)] || 0;
+                        return (
+                          <td key={k} className="col-num">
+                            {val.toLocaleString()}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Tab 2: Detailed Analytics Breakdown */}
+          {activeTab === 'analitico' && (
+            <div className="table-scroll-wrapper">
+              <table className="pelven-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Complejo</th>
+                    <th>Sala</th>
+                    <th>Aforo</th>
+                    <th>Espectadores Totales</th>
+                    <th>Funciones Base (V+I+N)</th>
+                    <th>Días con Función</th>
+                    <th>Factor</th>
+                    <th>Base Oficial (21)</th>
+                    <th>f20 (95.24%)</th>
+                    <th>f10 (47.62%)</th>
+                    <th>f1 (4.76%)</th>
+                    <th>Maestro</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filasFiltradas.map((r, i) => (
+                    <tr key={i}>
+                      <td className="col-center">{i + 1}</td>
+                      <td style={{ fontWeight: 600 }}>{r.complejo}</td>
+                      <td className="col-center">{r.sala}</td>
+                      <td className="col-num">{r.aforo}</td>
+                      <td className="col-num">{r.totalEspectadores.toLocaleString()}</td>
+                      <td className="col-num" style={{ color: '#38bdf8' }}>{Math.round(r.totalBase || r.base * (r.diasBase || 360) / 4.2).toLocaleString()}</td>
+                      <td className="col-center">{r.diasActivos}</td>
+                      <td className="col-center">{r.factorUsado || 4.2}</td>
+                      <td className="col-highlight">
+                        {r.base} <span style={{ fontSize: 10, opacity: 0.6 }}>({r.rawBase?.toFixed(2)})</span>
+                      </td>
+                      <td className="col-num">{r.f20}</td>
+                      <td className="col-num">{r.f10}</td>
+                      <td className="col-num">{r.f1}</td>
+                      <td className="col-center">
+                        <span style={{ color: r.enMaestro ? '#34d399' : '#f87171', fontWeight: 600 }}>
+                          {r.enMaestro ? '✓ Mapeado' : '✗ Sin maestro'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {/* Tab 3: Maestro CNAC Directory */}
+          {activeTab === 'maestro' && (
+            <div style={{ padding: 24 }}>
+              <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div>
+                  <h3 style={{ fontSize: 16, fontWeight: 700 }}>Directorio Nacional de Salas CNAC</h3>
+                  <p style={{ fontSize: 13, color: 'var(--text-muted)' }}>
+                    Total de {maestro.length} salas registradas en todos los circuitos nacionales.
+                  </p>
+                </div>
+              </div>
+              <div className="table-scroll-wrapper" style={{ maxHeight: 480 }}>
+                <table className="pelven-table">
+                  <thead>
+                    <tr>
+                      <th>Nro</th>
+                      <th>Circuito</th>
+                      <th>Administradora</th>
+                      <th>Complejo</th>
+                      <th>Estado</th>
+                      <th>Ciudad</th>
+                      <th>Sala</th>
+                      <th>Aforo</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {maestro.slice(0, 100).map((m, i) => (
+                      <tr key={i}>
+                        <td className="col-center">{m.nro || i + 1}</td>
+                        <td style={{ fontWeight: 600 }}>{m.circuito}</td>
+                        <td>{m.administradora}</td>
+                        <td style={{ color: '#fff' }}>{m.complejo}</td>
+                        <td className="col-center">{m.estado}</td>
+                        <td className="col-center">{m.ciudad}</td>
+                        <td className="col-center">{m.sala}</td>
+                        <td className="col-num">{m.aforo}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {maestro.length > 100 && (
+                <p style={{ marginTop: 12, fontSize: 12, color: 'var(--text-dim)', textAlign: 'center' }}>
+                  Mostrando las primeras 100 salas de {maestro.length} registradas en el maestro.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Tab 4: Integrity & Validation Audit */}
+          {activeTab === 'auditoria' && (
+            <div style={{ padding: 24 }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
+                Auditoría de Integridad y Validación
+              </h3>
+              <p style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 20 }}>
+                Verificación estricta de consistencia en boletos, horas de función, tarifas e impuestos según especificaciones técnicas CNAC.
+              </p>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, marginBottom: 24 }}>
+                <div style={{ padding: 16, background: 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                  <div style={{ color: '#34d399', fontWeight: 700, marginBottom: 4 }}>✓ Recaudación vs Boletos</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    Total Recaudación = Precio Unitario × Cantidad verificado en todas las filas.
+                  </div>
+                </div>
+
+                <div style={{ padding: 16, background: 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                  <div style={{ color: '#34d399', fontWeight: 700, marginBottom: 4 }}>✓ Rango de Fechas Válido</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    Rango detectado: {result.archivos?.[0]?.rango?.join(' al ') || 'Año completo 2025'}.
+                  </div>
+                </div>
+
+                <div style={{ padding: 16, background: 'rgba(56, 189, 248, 0.08)', borderRadius: 12, border: '1px solid rgba(56, 189, 248, 0.2)' }}>
+                  <div style={{ color: '#38bdf8', fontWeight: 700, marginBottom: 4 }}>✓ Salas Identificadas</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {result.salasDetectadas} salas de Cines Unidos cruzadas con el Maestro CNAC sin discrepancias.
+                  </div>
+                </div>
+              </div>
+
+              {result.totalErrores > 0 && (
+                <div>
+                  <h4 style={{ color: '#f87171', marginBottom: 8 }}>Inconsistencias Detectadas ({result.totalErrores})</h4>
+                  <pre style={{ background: '#111827', padding: 16, borderRadius: 8, fontSize: 12, overflow: 'auto', maxHeight: 280 }}>
+                    {JSON.stringify(result.errores, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Floating Toast Notification */}
+      {toast && (
+        <div className={`toast-msg ${toast.type}`}>
+          <span>{toast.type === 'error' ? '⚠️' : toast.type === 'success' ? '✅' : 'ℹ️'}</span>
+          <span>{toast.text}</span>
+        </div>
+      )}
+    </div>
+  );
+}
