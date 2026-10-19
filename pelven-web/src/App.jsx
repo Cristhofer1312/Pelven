@@ -103,13 +103,21 @@ export default function App() {
   // Descargar consolidado en Excel oficial
   const descargarExcel = async () => {
     if (!result?._full?.length) return;
+    if (result.bloqueado) {
+      showToast('Exportación bloqueada: corrige los errores de validación antes de descargar', 'error');
+      return;
+    }
     setExporting(true);
     try {
       const res = await fetch('/api/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filas: result._full, anio })
+        body: JSON.stringify({ filas: result._full, anio, bloqueado: result.bloqueado })
       });
+      if (res.status === 409) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Exportación bloqueada por errores de validación');
+      }
       if (!res.ok) throw new Error('Error al exportar archivo');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -183,6 +191,30 @@ export default function App() {
       errores: result.totalErrores || 0
     };
   }, [result, complejosDisponibles]);
+
+  const sinMaestro = useMemo(
+    () => (result?._full ? result._full.filter((r) => !r.enMaestro).length : 0),
+    [result]
+  );
+
+  const salasSinData = useMemo(
+    () => (result?._full ? result._full.filter((r) => r.sinData).length : 0),
+    [result]
+  );
+
+  const auditOk = result ? result.totalErrores === 0 : true;
+
+  const rangoGlobal = useMemo(() => {
+    if (!result?.archivos?.length) return '';
+    const fecha = (f) => {
+      const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(f || '');
+      return m ? new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1])) : null;
+    };
+    const fechas = result.archivos.flatMap((a) => (a.rango || []).map(fecha)).filter(Boolean).sort((a, b) => a - b);
+    if (!fechas.length) return '';
+    const fmt = (d) => `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    return `${fmt(fechas[0])} al ${fmt(fechas[fechas.length - 1])}`;
+  }, [result]);
 
   return (
     <div className="app-container">
@@ -335,7 +367,7 @@ export default function App() {
               <button
                 type="button"
                 className="btn-download"
-                disabled={exporting}
+                disabled={exporting || result?.bloqueado}
                 onClick={descargarExcel}
               >
                 {exporting ? (
@@ -370,6 +402,20 @@ export default function App() {
         </div>
       </section>
 
+      {result?.bloqueado && (
+        <div className="info-callout" style={{ marginTop: 16, borderColor: 'rgba(248, 113, 113, 0.5)', background: 'rgba(248, 113, 113, 0.08)' }}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f87171" strokeWidth="2" style={{ flexShrink: 0, marginTop: 2 }}>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+            <line x1="12" y1="9" x2="12" y2="13"></line>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+          <div>
+            <strong>Exportación bloqueada:</strong> {result.totalErrores} inconsistencias en {result.filasInvalidas} filas.
+            Las filas inválidas no se incluyeron en el cálculo. Corrige el archivo fuente y vuelve a procesar.
+          </div>
+        </div>
+      )}
+
       {/* KPI Dashboard Metrics (when result available) */}
       {kpis && (
         <section className="stats-grid">
@@ -379,7 +425,9 @@ export default function App() {
               <div className="stat-icon">📊</div>
             </div>
             <div className="stat-value">{kpis.totalFilas.toLocaleString()}</div>
-            <div className="stat-caption">Registros individuales validados</div>
+            <div className="stat-caption">
+              {result.filasValidas?.toLocaleString()} válidas · {result.filasInvalidas || 0} excluidas por error
+            </div>
           </div>
 
           <div className="glass-panel stat-card">
@@ -498,7 +546,7 @@ export default function App() {
                   className="btn-download"
                   style={{ padding: '8px 16px', fontSize: 13 }}
                   onClick={descargarExcel}
-                  disabled={exporting}
+                  disabled={exporting || result?.bloqueado}
                 >
                   📥 Exportar (.xlsx)
                 </button>
@@ -574,8 +622,10 @@ export default function App() {
                     <th>Sala</th>
                     <th>Aforo</th>
                     <th>Espectadores Totales</th>
-                    <th>Funciones Base (V+I+N)</th>
+                    <th>Espectadores Base (V+I+N)</th>
                     <th>Días con Función</th>
+                    <th>Días Base</th>
+                    <th>Semanas</th>
                     <th>Factor</th>
                     <th>Base Oficial (21)</th>
                     <th>f20 (95.24%)</th>
@@ -592,8 +642,10 @@ export default function App() {
                       <td className="col-center">{r.sala}</td>
                       <td className="col-num">{r.aforo}</td>
                       <td className="col-num">{r.totalEspectadores.toLocaleString()}</td>
-                      <td className="col-num" style={{ color: '#38bdf8' }}>{Math.round(r.totalBase || r.base * (r.diasBase || 360) / 4.2).toLocaleString()}</td>
+                      <td className="col-num" style={{ color: '#38bdf8' }}>{Math.round(r.totalBase || 0).toLocaleString()}</td>
                       <td className="col-center">{r.diasActivos}</td>
+                      <td className="col-center">{r.diasBase}</td>
+                      <td className="col-center">{r.semanasConData}</td>
                       <td className="col-center">{r.factorUsado || 4.2}</td>
                       <td className="col-highlight">
                         {r.base} <span style={{ fontSize: 10, opacity: 0.6 }}>({r.rawBase?.toFixed(2)})</span>
@@ -673,31 +725,84 @@ export default function App() {
               </p>
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16, marginBottom: 24 }}>
-                <div style={{ padding: 16, background: 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                  <div style={{ color: '#34d399', fontWeight: 700, marginBottom: 4 }}>✓ Recaudación vs Boletos</div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Total Recaudación = Precio Unitario × Cantidad verificado en todas las filas.
+                <div style={{ padding: 16, background: auditOk ? 'rgba(16, 185, 129, 0.08)' : 'rgba(248, 113, 113, 0.08)', borderRadius: 12, border: `1px solid ${auditOk ? 'rgba(16, 185, 129, 0.2)' : 'rgba(248, 113, 113, 0.35)'}` }}>
+                  <div style={{ color: auditOk ? '#34d399' : '#f87171', fontWeight: 700, marginBottom: 4 }}>
+                    {auditOk ? '✓' : '✗'} Recaudación vs Boletos
                   </div>
-                </div>
-
-                <div style={{ padding: 16, background: 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                  <div style={{ color: '#34d399', fontWeight: 700, marginBottom: 4 }}>✓ Rango de Fechas Válido</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    Rango detectado: {result.archivos?.[0]?.rango?.join(' al ') || 'Año completo 2025'}.
+                    {auditOk
+                      ? `Sin inconsistencias en ${result.filasValidas} filas válidas.`
+                      : `${result.totalErrores} inconsistencias en ${result.filasInvalidas} filas excluidas del cálculo.`}
                   </div>
                 </div>
 
                 <div style={{ padding: 16, background: 'rgba(56, 189, 248, 0.08)', borderRadius: 12, border: '1px solid rgba(56, 189, 248, 0.2)' }}>
-                  <div style={{ color: '#38bdf8', fontWeight: 700, marginBottom: 4 }}>✓ Salas Identificadas</div>
+                  <div style={{ color: '#38bdf8', fontWeight: 700, marginBottom: 4 }}>✓ Rango de Fechas</div>
                   <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {result.salasDetectadas} salas de Cines Unidos cruzadas con el Maestro CNAC sin discrepancias.
+                    {rangoGlobal ? `${rangoGlobal} · ${result.archivos.length} archivo(s)` : 'Sin rango disponible'}
+                  </div>
+                </div>
+
+                <div style={{ padding: 16, background: sinMaestro ? 'rgba(251, 191, 36, 0.08)' : 'rgba(16, 185, 129, 0.08)', borderRadius: 12, border: `1px solid ${sinMaestro ? 'rgba(251, 191, 36, 0.35)' : 'rgba(16, 185, 129, 0.2)'}` }}>
+                  <div style={{ color: sinMaestro ? '#fbbf24' : '#34d399', fontWeight: 700, marginBottom: 4 }}>
+                    {sinMaestro ? '⚠' : '✓'} Salas Identificadas
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {result.salasDetectadas} salas procesadas; {sinMaestro} sin maestro; {salasSinData} sin datos.
                   </div>
                 </div>
               </div>
 
+              {result.archivos?.length > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <h4 style={{ marginBottom: 8 }}>Archivos procesados</h4>
+                  <div className="table-scroll-wrapper">
+                    <table className="pelven-table">
+                      <thead>
+                        <tr>
+                          <th>Archivo</th>
+                          <th>Filas</th>
+                          <th>Válidas</th>
+                          <th>Inválidas</th>
+                          <th>Errores</th>
+                          <th>Avisos</th>
+                          <th>Semanas</th>
+                          <th>Rango</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {result.archivos.map((a, i) => (
+                          <tr key={i}>
+                            <td style={{ fontWeight: 600 }}>{a.file}</td>
+                            <td className="col-num">{a.filas?.toLocaleString()}</td>
+                            <td className="col-num">{a.filasValidas?.toLocaleString()}</td>
+                            <td className="col-num" style={{ color: a.filasInvalidas ? '#f87171' : undefined }}>{a.filasInvalidas}</td>
+                            <td className="col-num" style={{ color: a.errores ? '#f87171' : undefined }}>{a.errores}</td>
+                            <td className="col-num">{a.avisos}</td>
+                            <td className="col-num">{a.semanas}</td>
+                            <td className="col-center">{a.rango?.join(' al ')}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {result.totalAvisos > 0 && (
+                <div style={{ marginBottom: 24 }}>
+                  <h4 style={{ color: '#fbbf24', marginBottom: 8 }}>Avisos ({result.totalAvisos})</h4>
+                  <pre style={{ background: '#111827', padding: 16, borderRadius: 8, fontSize: 12, overflow: 'auto', maxHeight: 280 }}>
+                    {JSON.stringify(result.avisos, null, 2)}
+                  </pre>
+                </div>
+              )}
+
               {result.totalErrores > 0 && (
                 <div>
-                  <h4 style={{ color: '#f87171', marginBottom: 8 }}>Inconsistencias Detectadas ({result.totalErrores})</h4>
+                  <h4 style={{ color: '#f87171', marginBottom: 8 }}>
+                    Inconsistencias Detectadas ({result.totalErrores}) · exportación bloqueada
+                  </h4>
                   <pre style={{ background: '#111827', padding: 16, borderRadius: 8, fontSize: 12, overflow: 'auto', maxHeight: 280 }}>
                     {JSON.stringify(result.errores, null, 2)}
                   </pre>

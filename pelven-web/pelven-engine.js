@@ -9,20 +9,62 @@ import * as XLSX from 'xlsx';
 
 const FUNCIONES = ['Matinee', 'Vespertina', 'Intermedia', 'Noche', 'Media Noche', 'Continuada', 'Sin Función'];
 const TIPOS = ['Completo', 'Popular', 'Niños', 'Tercera Edad', 'Promoción', 'Cortesía', 'Sin Función'];
-const norm = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase(); // sin tildes: 'C.U. EL MARQUÉS' == 'C.U. EL MARQUES'
-const num = (s) => {
-  if (s == null || s === '') return 0;
-  const v = parseFloat(String(s).replace(/\./g, '').replace(',', '.'));
-  return Number.isFinite(v) ? v : NaN;
+const normCache = new Map();
+const norm = (s) => {
+  const key = String(s ?? '');
+  const cached = normCache.get(key);
+  if (cached !== undefined) return cached;
+  const value = key.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase(); // sin tildes: 'C.U. EL MARQUÉS' == 'C.U. EL MARQUES'
+  normCache.set(key, value);
+  return value;
 };
 
-// Parser universal para texto delimitado (CSV con comas, punto y coma, tabuladores, y soporte de comillas)
-export function parseDelimitedText(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
-  if (!lines.length) return [];
+// Acepta números nativos de Excel y textos en formato es-VE (1.234,56) o en-US (1,234.56).
+// Un único punto con exactamente 3 decimales se interpreta como separador de miles (1.234 -> 1234).
+export function parseNumber(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  if (value == null) return NaN;
 
-  // Detección automática del separador: tab (\t), punto y coma (;), coma (,), tubería (|)
-  const firstLine = lines[0];
+  let s = String(value).trim();
+  if (!s) return NaN;
+
+  s = s.replace(/\u00a0/g, ' ').replace(/\s+/g, '');
+  let negative = /^\(.*\)$/.test(s);
+  if (negative) s = s.slice(1, -1);
+  if (s.startsWith('-')) negative = true;
+  s = s.replace(/[^\d.,]/g, '');
+  if (!s || !/\d/.test(s)) return NaN;
+
+  const hasDot = s.includes('.');
+  const hasComma = s.includes(',');
+  if (hasDot && hasComma) {
+    // El último separador es el decimal; el otro es de miles.
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(/,/g, '.');
+    else s = s.replace(/,/g, '');
+  } else if (hasComma) {
+    const parts = s.split(',');
+    if (parts.length > 2 || (parts.length === 2 && parts[1].length === 3 && parts[0].length > 3)) s = s.replace(/,/g, '');
+    else s = s.replace(',', '.');
+  } else if (hasDot) {
+    const parts = s.split('.');
+    if (parts.length > 2) s = s.replace(/\./g, '');
+    else if (parts[1].length === 3 && parts[0].length <= 3 && parts[0] !== '0') s = s.replace('.', '');
+  }
+
+  const n = Number(s);
+  if (!Number.isFinite(n)) return NaN;
+  return negative ? -n : n;
+}
+
+// Parser para texto delimitado (TSV/CSV con tab, ;, , o |).
+// Solo la comilla doble abre/cierra un campo, y solo al inicio del campo. El apóstrofo es texto normal.
+export function parseDelimitedText(text) {
+  const lines = String(text ?? '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  const headerIndex = lines.findIndex((l) => l.trim().length > 0);
+  if (headerIndex === -1) return [];
+
+  // Detección automática del separador sobre la primera línea no vacía.
+  const firstLine = lines[headerIndex];
   const candidates = ['\t', ';', ',', '|'];
   let bestDelim = '\t';
   let maxCount = -1;
@@ -35,39 +77,61 @@ export function parseDelimitedText(text) {
   }
 
   function splitLine(line, delim) {
+    // Camino rápido: sin comillas no hace falta recorrer carácter por carácter.
+    if (!line.includes('"')) return { values: line.split(delim).map((v) => v.trim()), warning: '' };
+
     const result = [];
     let current = '';
     let inQuotes = false;
+    let atFieldStart = true;
     for (let i = 0; i < line.length; i++) {
       const char = line[i];
-      if (char === '"' || char === "'") {
-        if (inQuotes && line[i + 1] === char) {
-          current += char;
-          i++; // comilla escapada doble
+      if (inQuotes) {
+        if (char === '"') {
+          if (line[i + 1] === '"') {
+            current += '"';
+            i++; // comilla escapada ("" -> ")
+          } else {
+            inQuotes = false;
+          }
         } else {
-          inQuotes = !inQuotes;
+          current += char;
         }
-      } else if (char === delim && !inQuotes) {
+      } else if (char === '"' && atFieldStart) {
+        inQuotes = true;
+        atFieldStart = false;
+      } else if (char === delim) {
         result.push(current.trim());
         current = '';
+        atFieldStart = true;
       } else {
         current += char;
+        if (!/\s/.test(char)) atFieldStart = false;
       }
     }
+
+    if (inQuotes) {
+      // Una comilla desbalanceada no debe fusionar el resto de columnas.
+      return { values: line.split(delim).map((v) => v.trim().replace(/^"|"$/g, '')), warning: 'comillas desbalanceadas' };
+    }
+
     result.push(current.trim());
-    return result;
+    return { values: result, warning: '' };
   }
 
-  const headers = splitLine(lines[0], bestDelim).map((h) => h.replace(/^["']|["']$/g, '').trim());
+  const headers = splitLine(firstLine, bestDelim).values.map((h) => h.trim());
   const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const values = splitLine(lines[i], bestDelim);
+  for (let i = headerIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue; // se conserva el número de línea original
+    const { values, warning } = splitLine(line, bestDelim);
+    if (values.every((v) => v === '')) continue;
     const obj = {};
     headers.forEach((h, idx) => {
-      let val = values[idx] ?? '';
-      val = val.replace(/^["']|["']$/g, '').trim();
-      obj[h] = val;
+      obj[h] = values[idx] ?? '';
     });
+    obj.__line = i + 1;
+    if (warning) obj.__parseWarning = warning;
     rows.push(obj);
   }
   return rows;
@@ -87,7 +151,7 @@ export async function parseTaquillaFile(filePath, originalName = '') {
     const wb = XLSX.read(buf, { type: 'buffer' });
     const sheetName = wb.SheetNames[0];
     const sheetData = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: false });
-    rows = sheetData.map(normalizeRow);
+    rows = sheetData.map((o, i) => normalizeRow({ ...o, __line: i + 2 }));
   }
   // CASO 2: Archivo Excel OpenXML (.xlsx)
   else if (ext === 'xlsx' || isZip) {
@@ -98,7 +162,7 @@ export async function parseTaquillaFile(filePath, originalName = '') {
       const header = ws.getRow(1).values.slice(1).map((h) => String(h ?? '').trim());
       for (let r = 2; r <= ws.rowCount; r++) {
         const vals = ws.getRow(r).values.slice(1);
-        const o = {};
+        const o = { __line: r };
         header.forEach((h, i) => (o[h] = vals[i] ?? ''));
         rows.push(normalizeRow(o));
       }
@@ -106,7 +170,7 @@ export async function parseTaquillaFile(filePath, originalName = '') {
       const wb = XLSX.read(buf, { type: 'buffer' });
       const sheetName = wb.SheetNames[0];
       const sheetData = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: false });
-      rows = sheetData.map(normalizeRow);
+      rows = sheetData.map((o, i) => normalizeRow({ ...o, __line: i + 2 }));
     }
   }
   // CASO 3: Archivo XLS binario antiguo (OLE2 BIFF8)
@@ -114,7 +178,7 @@ export async function parseTaquillaFile(filePath, originalName = '') {
     const wb = XLSX.read(buf, { type: 'buffer' });
     const sheetName = wb.SheetNames[0];
     const sheetData = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { defval: '', raw: false });
-    rows = sheetData.map(normalizeRow);
+    rows = sheetData.map((o, i) => normalizeRow({ ...o, __line: i + 2 }));
   }
   // CASO 4: Archivos de texto delimitado (.csv, .tsv, .txt, o .xls TSV de Cines Unidos)
   else {
@@ -128,67 +192,155 @@ export async function parseTaquillaFile(filePath, originalName = '') {
 
   const fechas = rows.map((r) => r.Fecha).filter(Boolean);
   const toKey = (f) => f.slice(6, 10) + f.slice(3, 5) + f.slice(0, 2);
-  fechas.sort((a, b) => (toKey(a) < toKey(b) ? -1 : 1));
+  fechas.sort((a, b) => (toKey(a) < toKey(b) ? -1 : toKey(a) > toKey(b) ? 1 : 0));
   const semanas = new Set(rows.map((r) => semanaCine(r.Fecha)).filter(Boolean));
   return { rows, semanas, rango: fechas.length ? [fechas[0], fechas[fechas.length - 1]] : [] };
 }
 
-function pick(o, ...names) {
-  for (const n of names) {
-    const k = Object.keys(o).find((k) => norm(k) === norm(n));
-    if (k) return o[k];
+const FIELD_ALIASES = {
+  Fecha: ['Fecha'],
+  Complejo: ['Complejo', 'Complejo Cinematográfico'],
+  Sala: ['Salas', 'N° de Sala', 'Sala'],
+  Registro: ['N° Registro de la Obra', 'N Registro'],
+  Obra: ['Obra Cinematografica', 'Título de la Obra Cinematográfica'],
+  Formato: ['Formato de Proyeccion', 'Formato de Proyección'],
+  Hora: ['Hora', 'Hora de Exhibición'],
+  Funcion: ['Función', 'Funcion'],
+  TipoBoleto: ['Tipo de Boleto'],
+  PrecioBoleto: ['Precio Boleto', 'Precio de Boleto Bs.'],
+  PrecioServicio: ['Precio Servicio', 'Precio Servicio Bs.'],
+  OtrosCargos: ['Otros Cargos', 'Otros Cargos Bs.'],
+  OtrosIva: ['Otros Cargos IVA', 'Otros Cargos Iva Alícuota (%)'],
+  TotalPrecio: ['Total Precio', 'Total Precio de Boleto Bs.'],
+  Cantidad: ['Cantidad', 'N° de Espectadores'],
+  TotalRecaudacion: ['Total Recaudación', 'Total Recaudacion Bs.'],
+};
+for (const field of Object.keys(FIELD_ALIASES)) FIELD_ALIASES[field] = FIELD_ALIASES[field].map(norm);
+
+export function normalizeRow(o = {}) {
+  const lookup = new Map();
+  for (const [key, value] of Object.entries(o)) {
+    const nk = norm(key);
+    if (!lookup.has(nk)) lookup.set(nk, value);
   }
-  return '';
+  const get = (field) => {
+    for (const alias of FIELD_ALIASES[field]) {
+      if (lookup.has(alias)) return lookup.get(alias);
+    }
+    return '';
+  };
+
+  return {
+    Fecha: String(get('Fecha') ?? '').trim(),
+    Complejo: String(get('Complejo') ?? '').trim(),
+    Sala: String(get('Sala') ?? '').trim(),
+    Registro: String(get('Registro') ?? '').trim(),
+    Obra: String(get('Obra') ?? '').trim(),
+    Formato: String(get('Formato') ?? '').trim(),
+    Hora: String(get('Hora') ?? '').trim(),
+    Funcion: String(get('Funcion') ?? '').trim(),
+    TipoBoleto: String(get('TipoBoleto') ?? '').trim(),
+    PrecioBoleto: get('PrecioBoleto'),
+    PrecioServicio: get('PrecioServicio'),
+    OtrosCargos: get('OtrosCargos'),
+    OtrosIva: get('OtrosIva'),
+    TotalPrecio: get('TotalPrecio'),
+    Cantidad: get('Cantidad'),
+    TotalRecaudacion: get('TotalRecaudacion'),
+    Linea: Number(o?.__line) || 0,
+    ParseWarning: String(o?.__parseWarning ?? '').trim(),
+  };
 }
 
-function normalizeRow(o) {
-  return {
-    Fecha: String(pick(o, 'Fecha') ?? '').trim(),
-    Complejo: String(pick(o, 'Complejo', 'Complejo Cinematográfico') ?? '').trim(),
-    Sala: String(pick(o, 'Salas', 'N° de Sala', 'Sala') ?? '').trim(),
-    Registro: String(pick(o, 'N° Registro de la Obra', 'N Registro') ?? '').trim(),
-    Obra: String(pick(o, 'Obra Cinematografica', 'Título de la Obra Cinematográfica') ?? '').trim(),
-    Formato: String(pick(o, 'Formato de Proyeccion', 'Formato de Proyección') ?? '').trim(),
-    Hora: String(pick(o, 'Hora', 'Hora de Exhibición') ?? '').trim(),
-    Funcion: String(pick(o, 'Función', 'Funcion') ?? '').trim(),
-    TipoBoleto: String(pick(o, 'Tipo de Boleto') ?? '').trim(),
-    PrecioBoleto: pick(o, 'Precio Boleto', 'Precio de Boleto Bs.'),
-    PrecioServicio: pick(o, 'Precio Servicio', 'Precio Servicio Bs.'),
-    OtrosCargos: pick(o, 'Otros Cargos', 'Otros Cargos Bs.'),
-    OtrosIva: pick(o, 'Otros Cargos IVA', 'Otros Cargos Iva Alícuota (%)'),
-    TotalPrecio: pick(o, 'Total Precio', 'Total Precio de Boleto Bs.'),
-    Cantidad: pick(o, 'Cantidad', 'N° de Espectadores'),
-    TotalRecaudacion: pick(o, 'Total Recaudación', 'Total Recaudacion Bs.'),
-  };
+const FUNCIONES_NORM = new Set(FUNCIONES.map(norm));
+const TIPOS_NORM = new Set(TIPOS.map(norm));
+
+function isRealDate(d, m, y) {
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
 }
 
 export function validateRows(rows) {
   const errors = [];
   const warnings = [];
+  const invalidRows = [];
+
   rows.forEach((r, i) => {
-    const n = i + 2;
-    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(r.Fecha)) errors.push({ fila: n, campo: 'Fecha', valor: r.Fecha });
+    const fila = r.Linea || i + 2;
+    const archivo = r._file || '';
+    let invalid = false;
+    const err = (campo, valor, extra = {}) => {
+      errors.push({ archivo, fila, campo, valor, ...extra });
+      invalid = true;
+    };
+    const warn = (campo, valor, extra = {}) => {
+      warnings.push({ archivo, fila, campo, valor, ...extra });
+    };
+
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(r.Fecha)) err('Fecha', r.Fecha);
     else {
       const [d, m, y] = r.Fecha.split('/').map(Number);
-      if (m < 1 || m > 12 || d < 1 || d > 31) errors.push({ fila: n, campo: 'Fecha', valor: r.Fecha });
+      if (!isRealDate(d, m, y)) err('Fecha', r.Fecha);
     }
-    if (!/^\d{2}:\d{2}$/.test(r.Hora)) errors.push({ fila: n, campo: 'Hora', valor: r.Hora });
-    if (!FUNCIONES.map(norm).includes(norm(r.Funcion))) errors.push({ fila: n, campo: 'Funcion', valor: r.Funcion });
-    if (!TIPOS.map(norm).includes(norm(r.TipoBoleto))) errors.push({ fila: n, campo: 'TipoBoleto', valor: r.TipoBoleto });
-    const cant = Number(String(r.Cantidad).replace(',', '.'));
-    if (!Number.isInteger(cant) || cant < 0) errors.push({ fila: n, campo: 'Cantidad', valor: r.Cantidad });
-    const pb = num(r.PrecioBoleto), ps = num(r.PrecioServicio), oc = num(r.OtrosCargos), tp = num(r.TotalPrecio), tr = num(r.TotalRecaudacion);
-    if ([pb, ps, oc, tp, tr].some((v) => Number.isNaN(v))) errors.push({ fila: n, campo: 'Montos', valor: `${r.PrecioBoleto}|${r.PrecioServicio}|${r.OtrosCargos}|${r.TotalPrecio}|${r.TotalRecaudacion}` });
-    else {
+
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(r.Hora)) err('Hora', r.Hora);
+    if (!FUNCIONES_NORM.has(norm(r.Funcion))) err('Funcion', r.Funcion);
+    if (!TIPOS_NORM.has(norm(r.TipoBoleto))) err('TipoBoleto', r.TipoBoleto);
+    if (!r.Complejo) err('Complejo', r.Complejo);
+    if (!r.Sala) err('Sala', r.Sala);
+
+    const cant = parseNumber(r.Cantidad);
+    if (!Number.isInteger(cant) || cant < 0) err('Cantidad', r.Cantidad);
+
+    const pb = parseNumber(r.PrecioBoleto);
+    const ps = parseNumber(r.PrecioServicio);
+    const tp = parseNumber(r.TotalPrecio);
+    const tr = parseNumber(r.TotalRecaudacion);
+    for (const [campo, raw, value] of [
+      ['PrecioBoleto', r.PrecioBoleto, pb],
+      ['PrecioServicio', r.PrecioServicio, ps],
+      ['TotalPrecio', r.TotalPrecio, tp],
+      ['TotalRecaudacion', r.TotalRecaudacion, tr],
+    ]) {
+      if (!Number.isFinite(value)) err(campo, raw);
+      else if (value < 0) err(campo, raw);
+    }
+
+    // Otros Cargos es opcional; si no viene se asume 0. Si viene, debe ser numérico.
+    let oc = 0;
+    if (String(r.OtrosCargos ?? '').trim() !== '') {
+      oc = parseNumber(r.OtrosCargos);
+      if (!Number.isFinite(oc) || oc < 0) err('OtrosCargos', r.OtrosCargos);
+    }
+
+    let ocIva = 0;
+    if (String(r.OtrosIva ?? '').trim() !== '') {
+      ocIva = parseNumber(r.OtrosIva);
+      if (!Number.isFinite(ocIva) || ocIva < 0) warn('OtrosIva', r.OtrosIva);
+      else ocIva = ocIva || 0;
+    }
+
+    if ([pb, ps, oc, tp].every(Number.isFinite)) {
       // Evidencia empírica (fila Otros Cargos 11.22 IVA 16 → Total 169.99):
       // PrecioBoleto y PrecioServicio ya incluyen IVA; OtrosCargos se suma con su IVA.
-      const ocIva = Number(String(r.OtrosIva ?? 0).replace(',', '.')) || 0;
       const esperado = pb + ps + oc * (1 + ocIva / 100);
-      if (Math.abs(tp - esperado) > 0.03 && norm(r.TipoBoleto) !== 'SIN FUNCION') warnings.push({ fila: n, campo: 'TotalPrecio≠Boleto+Servicio+Otros*(1+IVA)', valor: tp, esperado: +esperado.toFixed(2) });
-      if (Math.abs(tr - tp * cant) > Math.max(1, tp * cant * 0.001)) errors.push({ fila: n, campo: 'TotalRecaudación≠Precio*Cantidad', valor: tr });
+      if (Math.abs(tp - esperado) > 0.03 && norm(r.TipoBoleto) !== 'SIN FUNCION') {
+        warn('TotalPrecio≠Boleto+Servicio+Otros*(1+IVA)', tp, { esperado: +esperado.toFixed(2) });
+      }
     }
+
+    if (Number.isFinite(tp) && Number.isFinite(tr) && Number.isInteger(cant) && cant >= 0) {
+      const esperadoTr = tp * cant;
+      if (Math.abs(tr - esperadoTr) > Math.max(1, Math.abs(esperadoTr) * 0.001)) {
+        err('TotalRecaudación≠Precio*Cantidad', tr, { esperado: +esperadoTr.toFixed(2) });
+      }
+    }
+
+    if (r.ParseWarning) warn('Formato', r.ParseWarning);
+    if (invalid) invalidRows.push(r);
   });
-  return { errors, warnings };
+
+  return { errors, warnings, invalidRows };
 }
 
 export function semanaCine(fechaDDMMAAAA) {
@@ -197,7 +349,10 @@ export function semanaCine(fechaDDMMAAAA) {
   const dt = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
   const delta = (dt.getDay() - 5 + 7) % 7; // viernes=5
   dt.setDate(dt.getDate() - delta);
-  return dt.toISOString().slice(0, 10);
+  const y = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${y}-${mm}-${dd}`;
 }
 
 const FUNCIONES_BASE = ['VESPERTINA', 'INTERMEDIA', 'NOCHE'];
@@ -208,9 +363,10 @@ export function aggregateBySala(rows) {
     if (norm(r.Funcion) === 'SIN FUNCION') continue; // no genera espectadores ni funciones
     const key = norm(r.Complejo) + '|' + String(r.Sala).trim();
     agg[key] ??= { complejo: r.Complejo.trim(), sala: String(r.Sala).trim(), total: 0, totalBase: 0, diasBase: new Set(), dias: new Set(), funciones: new Set(), porSemana: {} };
-    const c = Number(String(r.Cantidad).replace(',', '.')) || 0;
+    const c = parseNumber(r.Cantidad);
+    if (!Number.isFinite(c)) continue;
     agg[key].total += c;
-    if (FUNCIONES_BASE.includes(norm(r.Funcion).normalize('NFD').replace(/[\u0300-\u036f]/g, ''))) {
+    if (FUNCIONES_BASE.includes(norm(r.Funcion))) {
       agg[key].totalBase += c;
       agg[key].diasBase.add(r.Fecha);
     }
@@ -250,7 +406,8 @@ export function calcPelven(agg, mapMaestro, { semanasPorAnio = 52, factorDiario 
     const base = roundAt70(rawBase);
     const row = {
       nro: m?.nro ?? null,
-      complejo: a.complejo, sala: a.sala, totalEspectadores: a.total, diasActivos: dias,
+      complejo: a.complejo, sala: a.sala, totalEspectadores: a.total, totalBase: a.totalBase,
+      diasActivos: dias, diasBase: a.diasBase.size, semanasConData: Object.keys(a.porSemana).length,
       funcionesDistintas: a.funciones.size, base, rawBase, factorUsado: f,
       circuito: m?.circuito ?? '', administradora: m?.administradora ?? '',
       estado: m?.estado ?? '', ciudad: m?.ciudad ?? '', aforo: m?.aforo ?? 0, enMaestro: !!m,
@@ -270,8 +427,9 @@ export function calcPelven(agg, mapMaestro, { semanasPorAnio = 52, factorDiario 
     if (!agg[key] && debeIncluir) {
       const row = {
         nro: m.nro,
-        complejo: m.complejo, sala: String(m.sala), totalEspectadores: 0, diasActivos: 0, funcionesDistintas: 0,
-        base: 0, rawBase: 0, factorUsado: factorDiario,
+        complejo: m.complejo, sala: String(m.sala), totalEspectadores: 0, totalBase: 0,
+        diasActivos: 0, diasBase: 0, semanasConData: 0, funcionesDistintas: 0,
+        base: 0, rawBase: 0, factorUsado: factorDe(m.complejo),
         circuito: m.circuito, administradora: m.administradora, estado: m.estado, ciudad: m.ciudad, aforo: m.aforo,
         enMaestro: true, sinData: true
       };
@@ -285,9 +443,9 @@ export function calcPelven(agg, mapMaestro, { semanasPorAnio = 52, factorDiario 
   // 1. Si ambas salas están en el Maestro, respetar el orden correlativo oficial (Nro 1 a 323).
   // 2. Si hay salas nuevas/sin registro, agrupar por Circuito -> Administradora -> Complejo -> Sala.
   out.sort((x, y) => {
-    if (x.nro && y.nro) return x.nro - y.nro;
-    if (x.nro) return -1;
-    if (y.nro) return 1;
+    if (x.nro != null && y.nro != null) return x.nro - y.nro;
+    if (x.nro != null) return -1;
+    if (y.nro != null) return 1;
 
     const circComp = norm(x.circuito).localeCompare(norm(y.circuito));
     if (circComp !== 0) return circComp;
@@ -388,7 +546,7 @@ export async function buildWorkbook(filas, anio) {
   // Filas de datos (a partir de fila 8)
   filas.forEach((r, i) => {
     const rowValues = [
-      i + 1,
+      r.nro != null ? r.nro : i + 1,
       r.circuito,
       r.administradora,
       r.complejo,

@@ -10,7 +10,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3001;
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 const upload = multer({ dest: path.join(__dirname, 'uploads'), limits: { fileSize: 200 * 1024 * 1024 } });
 if (!fs.existsSync(path.join(__dirname, 'uploads'))) fs.mkdirSync(path.join(__dirname, 'uploads'));
@@ -18,6 +18,13 @@ if (!fs.existsSync(path.join(__dirname, 'uploads'))) fs.mkdirSync(path.join(__di
 // Maestro en memoria (seed + ediciones). Clave: complejoNormalizado|sala
 let maestro = JSON.parse(fs.readFileSync(path.join(__dirname, 'maestro-seed.json'), 'utf-8'));
 const norm = (s) => String(s ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toUpperCase();
+
+// multer entrega el nombre en latin1; se corrige para nombres con tildes/ñ.
+const fixFilename = (name) => {
+  const raw = String(name ?? '');
+  const fixed = Buffer.from(raw, 'latin1').toString('utf8');
+  return fixed.includes('\uFFFD') ? raw : fixed;
+};
 
 function maestroMap() {
   const m = new Map();
@@ -49,49 +56,98 @@ app.put('/api/maestro/:idx', (req, res) => {
 // Subir uno o varios reportes CNAC (.xls, .xlsx, .ods, .csv, .tsv)
 app.post('/api/upload', upload.any(), async (req, res) => {
   try {
+    if (!req.files?.length) return res.status(400).json({ error: 'No se recibió ningún archivo' });
+
     const semanasPorAnio = Number(req.body.semanasPorAnio || 52);
     const factorDiario = Number(req.body.factorDiario || 4.2); // base = promedio diario (Vesp+Inter+Noche) * factorDiario
-    const factoresPorComplejo = req.body.factoresPorComplejo ? JSON.parse(req.body.factoresPorComplejo) : {};
-    const allRows = [];
-    const perFile = [];
-    for (const f of req.files) {
-      const parsed = await parseTaquillaFile(f.path, f.originalname);
-      fs.unlink(f.path, () => {}); // borrar temporal de multer para no acumular 78MB por carga
-      const { errors, warnings } = validateRows(parsed.rows);
-      perFile.push({ file: f.originalname, filas: parsed.rows.length, errores: errors.length, avisos: warnings.length, semanas: parsed.semanas.size, rango: parsed.rango });
-      for (const r of parsed.rows) allRows.push({ ...r, _file: f.originalname });
+    let factoresPorComplejo = {};
+    if (req.body.factoresPorComplejo) {
+      try {
+        factoresPorComplejo = JSON.parse(req.body.factoresPorComplejo);
+      } catch {
+        return res.status(400).json({ error: 'factoresPorComplejo no es JSON válido' });
+      }
     }
+    if (!Number.isFinite(factorDiario) || factorDiario <= 0) {
+      return res.status(400).json({ error: 'factorDiario debe ser un número mayor que cero' });
+    }
+
+    const allRows = [];
+    const invalidRows = new Set();
+    const allErrors = [];
+    const allWarnings = [];
+    const perFile = [];
+
+    for (const f of req.files) {
+      const fileName = fixFilename(f.originalname);
+      let parsed;
+      try {
+        parsed = await parseTaquillaFile(f.path, fileName);
+      } catch (e) {
+        throw new Error(`${fileName}: ${e.message || e}`);
+      } finally {
+        fs.unlink(f.path, () => {}); // borrar temporal de multer incluso si el parseo falla
+      }
+
+      const rows = parsed.rows.map((r) => ({ ...r, _file: fileName }));
+      const { errors, warnings, invalidRows: fileInvalid } = validateRows(rows);
+      for (const r of fileInvalid) invalidRows.add(r);
+      for (const r of rows) allRows.push(r);
+      for (const e of errors) allErrors.push(e);
+      for (const w of warnings) allWarnings.push(w);
+      perFile.push({
+        file: fileName,
+        filas: rows.length,
+        filasValidas: rows.length - fileInvalid.length,
+        filasInvalidas: fileInvalid.length,
+        errores: errors.length,
+        avisos: warnings.length,
+        semanas: parsed.semanas.size,
+        rango: parsed.rango,
+      });
+    }
+
     const incluirTodosCircuitos = req.body.incluirTodosCircuitos === 'true' || req.body.incluirTodosCircuitos === true;
-    const { errors, warnings } = validateRows(allRows);
-    const agg = aggregateBySala(allRows);
+    const validRows = allRows.filter((r) => !invalidRows.has(r));
+    const agg = aggregateBySala(validRows);
     const pelven = calcPelven(agg, maestroMap(), { semanasPorAnio, factorDiario, factoresPorComplejo, incluirTodosCircuitos });
     const circuitosDetectados = Array.from(new Set(pelven.map((r) => r.circuito).filter(Boolean)));
+
     res.json({
       archivos: perFile,
       totalFilas: allRows.length,
+      filasValidas: validRows.length,
+      filasInvalidas: invalidRows.size,
       salasDetectadas: Object.keys(agg).length,
       circuitosDetectados,
-      errores: errors.slice(0, 200),
-      totalErrores: errors.length,
-      avisos: warnings.slice(0, 200),
-      totalAvisos: warnings.length,
+      bloqueado: allErrors.length > 0,
+      errores: allErrors.slice(0, 200),
+      totalErrores: allErrors.length,
+      avisos: allWarnings.slice(0, 200),
+      totalAvisos: allWarnings.length,
       preview: pelven.slice(0, 20),
       _full: pelven
     });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: String(e.message || e) });
+  } finally {
+    // Limpieza defensiva: cubre errores tempranos y archivos que no llegaron a parsearse.
+    for (const f of req.files || []) fs.unlink(f.path, () => {});
   }
 });
 
 // Generar y descargar consolidado
-app.post('/api/export', express.json({ limit: '50mb' }), async (req, res) => {
+app.post('/api/export', async (req, res) => {
   try {
-    const { filas, anio = 2026 } = req.body;
+    const { filas, anio = 2026, bloqueado } = req.body || {};
+    if (bloqueado) return res.status(409).json({ error: 'Exportación bloqueada: hay errores de validación sin resolver' });
+    const year = Number(anio);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) return res.status(400).json({ error: 'Año inválido' });
     if (!Array.isArray(filas) || !filas.length) return res.status(400).json({ error: 'filas vacías' });
-    const buf = await buildWorkbook(filas, anio);
+    const buf = await buildWorkbook(filas, year);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename=Pelven_aplica_${anio}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename=Pelven_aplica_${year}.xlsx`);
     res.send(Buffer.from(buf));
   } catch (e) {
     console.error(e);
