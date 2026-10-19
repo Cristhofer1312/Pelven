@@ -15,6 +15,7 @@ import {
   semanaCine,
   buildWorkbook,
   parseTaquillaFile,
+  findDuplicateRows,
 } from '../pelven-engine.js';
 
 const HEADER = [
@@ -166,6 +167,45 @@ test('aggregateBySala y calcPelven usan solo Vespertina+Intermedia+Noche', () =>
   assert.equal(r.base, 42);
   assert.equal(r.f21, 42);
   assert.equal(r.f20, 40);
+});
+
+test('calcPelven usa la fracción exacta n/21 y no factores pre-redondeados', () => {
+  const diasBase = new Set(Array.from({ length: 30 }, (_, i) => `${String(i + 1).padStart(2, '0')}/01/2025`));
+  const agg = {
+    'C.U. PRUEBA|1': {
+      complejo: 'C.U. PRUEBA',
+      sala: '1',
+      total: 50000,
+      totalBase: 50000,
+      diasBase,
+      dias: new Set(diasBase),
+      funciones: new Set(),
+      porSemana: {},
+    },
+  };
+  const out = calcPelven(agg, new Map(), { factorDiario: 4.2 });
+  assert.equal(out[0].base, 7000);
+  // 7000 * 0.9524 = 6666.8 (redondearía a 6667); 7000 * 20/21 = 6666.666… → 6666.
+  assert.equal(out[0].f20, 6666);
+  assert.equal(out[0].f10, 3333);
+  assert.equal(out[0].f1, 333);
+});
+
+test('findDuplicateRows detecta filas idénticas y no las marca como error', () => {
+  const a = { ...makeRow(), Linea: 10, _file: 'a.xls' };
+  const b = { ...makeRow(), Linea: 20, _file: 'b.xls' };
+  const c = { ...makeRow({ Cantidad: '6' }), Linea: 21, _file: 'b.xls' };
+
+  const res = findDuplicateRows([a, b, c]);
+  assert.equal(res.grupos, 1);
+  assert.equal(res.filasExtra, 1);
+  assert.equal(res.detalle[0].ocurrencias, 2);
+  assert.equal(res.detalle[0].filas[0].archivo, 'a.xls');
+  assert.equal(res.detalle[0].filas[1].archivo, 'b.xls');
+
+  const sinDuplicados = findDuplicateRows([a, c]);
+  assert.equal(sinDuplicados.grupos, 0);
+  assert.equal(sinDuplicados.filasExtra, 0);
 });
 
 test('roundAt70 aplica el criterio reglamentario', () => {

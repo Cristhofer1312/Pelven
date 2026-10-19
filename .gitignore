@@ -8,6 +8,10 @@ pelven-web/dist/
 uploads/
 pelven-web/uploads/
 
+# Datos runtime (semilla versionada en pelven-web/maestro-seed.json)
+pelven-web/maestro.json
+pelven-web/runs/
+
 # Análisis exploratorio local
 scratch/
 *.pkl

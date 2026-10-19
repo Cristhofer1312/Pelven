@@ -378,10 +378,60 @@ export function aggregateBySala(rows) {
   return agg;
 }
 
+// Detecta filas con exactamente los mismos valores de negocio (misma fecha, sala,
+// función, boleto, montos y cantidad). Es informativo: en los reportes CNAC una
+// misma combinación puede aparecer en más de una línea por lotes de venta distintos,
+// por lo que NO se excluye automáticamente ni bloquea la exportación.
+const DUPLICADO_TEXTO = ['Fecha', 'Complejo', 'Sala', 'Registro', 'Obra', 'Formato', 'Hora', 'Funcion', 'TipoBoleto'];
+const DUPLICADO_NUMEROS = ['PrecioBoleto', 'PrecioServicio', 'OtrosCargos', 'OtrosIva', 'TotalPrecio', 'Cantidad', 'TotalRecaudacion'];
+
+function claveDuplicado(r) {
+  const texto = DUPLICADO_TEXTO.map((k) => norm(r[k])).join('\u0001');
+  const numeros = DUPLICADO_NUMEROS.map((k) => String(r[k] ?? '').trim().replace(/\s+/g, '')).join('\u0001');
+  return texto + '\u0001' + numeros;
+}
+
+export function findDuplicateRows(rows, { limit = 100 } = {}) {
+  const grupos = new Map();
+  for (const r of rows) {
+    const key = claveDuplicado(r);
+    if (!grupos.has(key)) grupos.set(key, []);
+    grupos.get(key).push(r);
+  }
+
+  const repetidos = [...grupos.values()].filter((g) => g.length > 1);
+  repetidos.sort((a, b) => b.length - a.length);
+  const filasExtra = repetidos.reduce((acc, g) => acc + g.length - 1, 0);
+  const detalle = repetidos.slice(0, limit).map((g) => {
+    const r = g[0];
+    return {
+      fecha: r.Fecha,
+      complejo: r.Complejo,
+      sala: r.Sala,
+      hora: r.Hora,
+      funcion: r.Funcion,
+      tipoBoleto: r.TipoBoleto,
+      cantidad: r.Cantidad,
+      ocurrencias: g.length,
+      filas: g.slice(0, 20).map((x) => ({ archivo: x._file || '', linea: x.Linea || 0 })),
+    };
+  });
+
+  return {
+    grupos: repetidos.length,
+    filasExtra,
+    detalle,
+    detalleTruncado: repetidos.length > limit,
+  };
+}
+
+// Factores de presentación (4 decimales) para la fila 7 del reporte oficial.
+// El cálculo usa la fracción exacta n/21 para no introducir error de redondeo.
 export const PELVEN_FACTORES = [
   0.9524, 0.9048, 0.8571, 0.8095, 0.7619, 0.7143, 0.6667, 0.6190, 0.5714, 0.5238,
   0.4762, 0.4286, 0.3810, 0.3333, 0.2857, 0.2381, 0.1905, 0.1429, 0.0952, 0.0476
 ];
+const PELVEN_FACTORES_EXACTOS = Array.from({ length: 20 }, (_, i) => (20 - i) / 21);
 
 // Redondeo reglamentario a mayor a partir de .70:
 // Si la parte decimal es >= 0.70 se redondea hacia arriba, de lo contrario hacia abajo.
@@ -392,7 +442,7 @@ export function roundAt70(val) {
   return (dec >= 0.70 - 1e-9) ? intPart + 1 : intPart;
 }
 
-export function calcPelven(agg, mapMaestro, { semanasPorAnio = 52, factorDiario = 4.2, factoresPorComplejo = {}, incluirTodosCircuitos = false } = {}) {
+export function calcPelven(agg, mapMaestro, { factorDiario = 4.2, factoresPorComplejo = {}, incluirTodosCircuitos = false } = {}) {
   const out = [];
   const factorDe = (complejo) => {
     const hit = Object.entries(factoresPorComplejo).find(([k]) => norm(complejo).includes(norm(k)));
@@ -413,7 +463,7 @@ export function calcPelven(agg, mapMaestro, { semanasPorAnio = 52, factorDiario 
       estado: m?.estado ?? '', ciudad: m?.ciudad ?? '', aforo: m?.aforo ?? 0, enMaestro: !!m,
     };
     row['f21'] = base;
-    PELVEN_FACTORES.forEach((fac, idx) => {
+    PELVEN_FACTORES_EXACTOS.forEach((fac, idx) => {
       row['f' + (20 - idx)] = roundAt70(base * fac);
     });
     out.push(row);

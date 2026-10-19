@@ -16,10 +16,17 @@ de taquilla que los exhibidores envían al CNAC (formato `ESPECIFICACIONES.docx`
   Matinee, Media Noche y `Sin Función` no cuentan. Réplica sobre las 164 salas CU: error medio 0,26 %,
   máximo 1,54 %. El Excel generado coincide celda a celda con `Pelven_generado_2026.xlsx`.
   No requiere excepciones por complejo (Metrocenter incluido).
-- **Columnas 20→1 exactas**: `base × n/21`.
-- El Pelven nacional tiene 323 salas (todos los circuitos); el maestro
-  (`maestro-seed.json`, extraído del Pelven 2026) aporta Circuito/Administradora/Estado/Ciudad/Aforo.
-  Se mantiene editando `maestro-seed.json` y reiniciando el servidor; la pestaña Maestro de la UI es de solo lectura.
+- **Columnas 20→1 exactas**: `base × n/21` usando la fracción exacta (no factores de 4 decimales).
+  El ajuste cambió 9 celdas (+1) respecto del generado anterior, por cruces del umbral 0,70.
+- El Pelven nacional tiene 323 salas (todos los circuitos). El maestro versionado
+  (`maestro-seed.json`) se copia en el primer arranque a `maestro.json`, que es la fuente de verdad
+  editable desde la pestaña **Maestro CNAC** (crear/editar/eliminar). Los cambios persisten entre reinicios.
+- **Trazabilidad**: cada `/api/upload` guarda un manifiesto JSON en `runs/` con SHA-256 de los
+  archivos, parámetros, totales, errores, avisos, duplicados y cobertura. La pestaña Auditoría permite
+  descargarlo y ver las corridas recientes.
+- **Validaciones informativas**: se detectan posibles duplicados exactos (no se excluyen ni bloquean,
+  porque pueden ser lotes de venta distintos) y huecos de cobertura contra el rango declarado en el
+  nombre del archivo (ej. falta `31/12/2025` en el reporte real de Cines Unidos).
 
 ## Uso
 
@@ -31,9 +38,12 @@ npm.cmd run dev      :: UI React en http://localhost:5173 (proxy /api)
 ```
 
 1. Abre la UI, sube uno o varios reportes (`*_aaaammdd-aaaammdd.xls`), ajusta año y factor.
-2. Revisa el resumen por archivo, los avisos y las salas sin maestro. Si hay errores, la exportación
-   queda bloqueada y las filas inválidas se excluyen del cálculo: corrige el archivo fuente y vuelve a subirlo.
+2. Revisa el resumen por archivo, los avisos, la cobertura, los posibles duplicados y las salas sin maestro.
+   Si hay errores, la exportación queda bloqueada y las filas inválidas se excluyen del cálculo:
+   corrige el archivo fuente y vuelve a subirlo.
 3. Descarga `Pelven_aplica_AAAA.xlsx` (mismo layout: cabecera Providencia 002, 21→1 + %).
+   La casilla **Solo filas filtradas** permite exportar el subconjunto visible sin afectar el consolidado completo.
+4. Administra el directorio nacional en la pestaña **Maestro CNAC** (los cambios se guardan en `maestro.json`).
 
 ## Pruebas
 
@@ -51,10 +61,24 @@ la base calculada contra `base2026` del maestro.
   o libera el puerto antes de iniciar otro (`netstat -ano | findstr :3001` y `Stop-Process -Id <PID>`).
 - Los temporales de carga se borran solos tras procesar (incluso si el parseo falla); no se acumulan en `uploads/`.
 - La exportación responde `409` si se envía `bloqueado: true`; la UI ya deshabilita la descarga con errores.
+- `maestro.json` y `runs/` son datos de ejecución ignorados por Git. `maestro-seed.json` solo se usa
+  para crear `maestro.json` la primera vez; para volver al directorio original, borra `maestro.json` y reinicia.
 
 ## API
 
-- `GET /api/health`, `GET /api/maestro`, `POST /api/maestro`, `PUT /api/maestro/:idx`
-- `POST /api/upload` (multipart `files`, campos `factorDiario`, `factoresPorComplejo` JSON, `semanasPorAnio`)
-  → responde `{ archivos, filasValidas, filasInvalidas, bloqueado, errores, avisos, _full, ... }`
-- `POST /api/export` (`{ filas, anio, bloqueado }` → xlsx; `409` si `bloqueado`)
+- `GET /api/health`
+- `GET /api/maestro`, `POST /api/maestro`, `PUT /api/maestro/:idx`, `DELETE /api/maestro/:idx`
+- `POST /api/upload` (multipart `files`, campos `anio`, `factorDiario`, `factoresPorComplejo` JSON)
+  → responde `{ archivos, filasValidas, filasInvalidas, bloqueado, errores, avisos, duplicados, cobertura, manifiesto, _full, ... }`
+- `GET /api/runs`, `GET /api/runs/:id` (historial de manifiestos)
+- `POST /api/export` (`{ filas, anio, bloqueado, sufijo }` → xlsx; `409` si `bloqueado`)
+
+## Pendientes conocidos
+
+- `xlsx@0.18.5` (lectura de `.ods` y `.xls` binario antiguo) tiene avisos de prototype pollution y ReDoS
+  sin parche disponible en npm; ExcelJS no lee BIFF8. Se mantiene porque es el único lector de esos formatos.
+- La exportación sigue confiando en el campo `bloqueado` que envía el cliente; una llamada manual a
+  `/api/export` con filas propias podría saltarse el bloqueo. Endurecerlo requiere un token de exportación
+  emitido por `/api/upload`.
+- El parser carga el archivo completo en memoria (~78 MB, cientos de MB en filas); es aceptable para el
+  reporte anual real, pero no para streaming de archivos mucho mayores.
